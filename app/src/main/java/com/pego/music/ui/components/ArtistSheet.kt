@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -41,9 +42,10 @@ import com.pego.music.ui.theme.PegoTextSecondary
 fun ArtistSheet(
     state: ArtistUiState,
     currentTrackId: String?,
+    shuffleEnabled: Boolean,
     onDismiss: () -> Unit,
     onPlayTrack: (TrackItem, List<TrackItem>) -> Unit,
-    onPlayShuffled: (List<TrackItem>) -> Unit,
+    onToggleShuffle: () -> Unit,
     onDownloadTrack: (TrackItem) -> Unit,
     onAddToPlaylist: (TrackItem) -> Unit,
     onEditCover: (TrackItem) -> Unit,
@@ -76,12 +78,27 @@ fun ArtistSheet(
                 modifier = Modifier.weight(1f)
             )
             if (allArtistTracks.isNotEmpty()) {
-                IconButton(onClick = { onPlayShuffled(allArtistTracks) }) {
-                    Icon(Icons.Rounded.Shuffle, contentDescription = "Aleatorio", tint = PegoGreen)
+                IconButton(onClick = onToggleShuffle) {
+                    Icon(
+                        imageVector = if (shuffleEnabled) {
+                            Icons.Rounded.Shuffle
+                        } else {
+                            Icons.AutoMirrored.Rounded.PlaylistPlay
+                        },
+                        contentDescription = if (shuffleEnabled) "Aleatorio" else "Secuencial",
+                        tint = if (shuffleEnabled) PegoGreen else PegoTextSecondary
+                    )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
                 Button(
-                    onClick = { onPlayTrack(allArtistTracks.first(), allArtistTracks) },
+                    onClick = {
+                        val startTrack = if (shuffleEnabled) {
+                            allArtistTracks.random()
+                        } else {
+                            allArtistTracks.first()
+                        }
+                        onPlayTrack(startTrack, allArtistTracks)
+                    },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = PegoGreen,
                         contentColor = Color.Black

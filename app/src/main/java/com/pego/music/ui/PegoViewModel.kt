@@ -127,9 +127,28 @@ class PegoViewModel(
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val localPlaylists: StateFlow<List<LocalPlaylist>> = dao.observePlaylistsWithTracks()
-        .map { list -> list.map { it.toDomain() } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val localPlaylists: StateFlow<List<LocalPlaylist>> = combine(
+        dao.observePlaylistsWithTracks(),
+        allSavedTracksMap
+    ) { list, savedMap ->
+        val downloadedByKey = savedMap.values
+            .filter { it.isDownloaded }
+            .associateBy {
+                TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}")
+            }
+        list.map { plWithTracks ->
+            val pl = plWithTracks.toDomain()
+            pl.copy(
+                tracks = pl.tracks.map { t ->
+                    if (t.isDownloaded) t
+                    else {
+                        val key = TitleCleaner.normalizeForMatching("${t.artist} ${t.cleanTitle.ifBlank { t.title }}")
+                        downloadedByKey[key] ?: t
+                    }
+                }
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
      * Syncs recommendation download status with Room (matching by ID or normalized artist+title)
@@ -597,7 +616,9 @@ class PegoViewModel(
             )
             if (initialTrack != null) {
                 val trackToSave = resolveTrackIfNeeded(initialTrack) ?: initialTrack
-                dao.insertTrackIgnore(TrackEntity.fromDomain(trackToSave))
+                if (dao.getTrackById(trackToSave.id) == null) {
+                    dao.insertTrackIgnore(TrackEntity.fromDomain(trackToSave))
+                }
                 dao.insertPlaylistRefs(
                     listOf(PlaylistTrackCrossRef(playlistId = playlistId, trackId = trackToSave.id, position = 0))
                 )
@@ -609,7 +630,9 @@ class PegoViewModel(
     fun addTrackToPlaylist(playlistId: Long, track: TrackItem) {
         viewModelScope.launch(Dispatchers.IO) {
             val trackToSave = resolveTrackIfNeeded(track) ?: track
-            dao.insertTrackIgnore(TrackEntity.fromDomain(trackToSave))
+            if (dao.getTrackById(trackToSave.id) == null) {
+                dao.insertTrackIgnore(TrackEntity.fromDomain(trackToSave))
+            }
             dao.insertPlaylistRefs(
                 listOf(PlaylistTrackCrossRef(playlistId = playlistId, trackId = trackToSave.id, position = 0))
             )
@@ -621,6 +644,19 @@ class PegoViewModel(
     }
 
     private suspend fun resolveTrackIfNeeded(track: TrackItem): TrackItem? {
+        dao.getTrackById(track.id)?.takeIf { it.downloadStatus == DownloadStatus.COMPLETED.name }?.let {
+            return it.toDomain()
+        }
+        if (track.isDownloaded) return track
+
+        val key = TitleCleaner.normalizeForMatching("${track.artist} ${track.cleanTitle.ifBlank { track.title }}")
+        dao.getAllTracksOnce()
+            .firstOrNull {
+                it.downloadStatus == DownloadStatus.COMPLETED.name &&
+                    TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}") == key
+            }
+            ?.let { return it.toDomain() }
+
         if (track.sourceUrl.isNotBlank()) return track
         val found = runCatching {
             container.extractorRepo.searchMusic("${track.artist} ${track.cleanTitle}", originalsOnly = true)
@@ -948,6 +984,7 @@ class PegoViewModel(
         syncJob = viewModelScope.launch {
             val imported = runCatching { container.localLibraryScanner.scanAndImport() }
                 .getOrDefault(0)
+            runCatching { repairPlaylistDownloadedRefs() }
             if (showToast) {
                 _uiMessage.value = if (imported > 0) {
                     "$imported canciones restauradas desde el dispositivo"
@@ -958,6 +995,43 @@ class PegoViewModel(
             val recoveredCovers = runCatching { backfillMissingCovers() }.getOrDefault(0)
             if (recoveredCovers > 0) {
                 _uiMessage.value = "$recoveredCovers portadas restauradas"
+            }
+        }
+    }
+
+    /**
+     * Re-links any un-downloaded playlist entry to an existing COMPLETED local track
+     * matching the same artist+title so playlists never ask to re-download already local songs.
+     */
+    private suspend fun repairPlaylistDownloadedRefs() = withContext(Dispatchers.IO) {
+        val allTracks = dao.getAllTracksOnce()
+        val downloadedByKey = allTracks
+            .filter { it.downloadStatus == DownloadStatus.COMPLETED.name }
+            .associateBy {
+                TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}")
+            }
+        if (downloadedByKey.isEmpty()) return@withContext
+
+        dao.getPlaylistsWithTracksOnce().forEach { plWithTracks ->
+            plWithTracks.tracks.forEachIndexed { idx, track ->
+                if (track.downloadStatus != DownloadStatus.COMPLETED.name) {
+                    val key = TitleCleaner.normalizeForMatching(
+                        "${track.artist} ${track.cleanTitle.ifBlank { track.title }}"
+                    )
+                    val downloadedMatch = downloadedByKey[key]
+                    if (downloadedMatch != null && downloadedMatch.id != track.id) {
+                        dao.removeTrackFromPlaylist(plWithTracks.playlist.id, track.id)
+                        dao.insertPlaylistRefs(
+                            listOf(
+                                PlaylistTrackCrossRef(
+                                    playlistId = plWithTracks.playlist.id,
+                                    trackId = downloadedMatch.id,
+                                    position = idx
+                                )
+                            )
+                        )
+                    }
+                }
             }
         }
     }

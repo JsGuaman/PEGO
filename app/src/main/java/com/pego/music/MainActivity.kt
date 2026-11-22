@@ -222,15 +222,9 @@ class MainActivity : ComponentActivity() {
                                 activeDownloads = activeDownloads,
                                 playlists = localPlaylists,
                                 currentTrackId = playbackState.currentTrack?.id,
+                                shuffleEnabled = playbackState.shuffleEnabled,
                                 onPlayTrack = viewModel::playTrack,
-                                onPlayShuffled = { tracks ->
-                                    if (tracks.isNotEmpty()) {
-                                        if (!playbackState.shuffleEnabled) {
-                                            viewModel.toggleShuffle()
-                                        }
-                                        viewModel.playTrack(tracks.random(), tracks)
-                                    }
-                                },
+                                onToggleShuffle = viewModel::toggleShuffle,
                                 onRetryDownload = viewModel::downloadSingleTrack,
                                 onCancelQueueTrack = { viewModel.cancelOrRemoveQueuedDownload(it.id) },
                                 onArtistClick = viewModel::openArtistPage,
@@ -252,16 +246,10 @@ class MainActivity : ComponentActivity() {
                             ArtistSheet(
                                 state = currentArtist,
                                 currentTrackId = playbackState.currentTrack?.id,
+                                shuffleEnabled = playbackState.shuffleEnabled,
                                 onDismiss = viewModel::closeArtistPage,
                                 onPlayTrack = viewModel::playTrack,
-                                onPlayShuffled = { tracks ->
-                                    if (tracks.isNotEmpty()) {
-                                        if (!playbackState.shuffleEnabled) {
-                                            viewModel.toggleShuffle()
-                                        }
-                                        viewModel.playTrack(tracks.random(), tracks)
-                                    }
-                                },
+                                onToggleShuffle = viewModel::toggleShuffle,
                                 onDownloadTrack = viewModel::downloadSingleTrack,
                                 onAddToPlaylist = { trackForPlaylist = it },
                                 onEditCover = {

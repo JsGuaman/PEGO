@@ -62,8 +62,9 @@ fun LibraryScreen(
     activeDownloads: List<TrackItem>,
     playlists: List<LocalPlaylist>,
     currentTrackId: String?,
+    shuffleEnabled: Boolean,
     onPlayTrack: (TrackItem, List<TrackItem>) -> Unit,
-    onPlayShuffled: (List<TrackItem>) -> Unit,
+    onToggleShuffle: () -> Unit,
     onRetryDownload: (TrackItem) -> Unit,
     onCancelQueueTrack: (TrackItem) -> Unit,
     onArtistClick: (String) -> Unit,
@@ -108,16 +109,25 @@ fun LibraryScreen(
                     )
                 }
                 if (currentOpened.tracks.isNotEmpty()) {
-                    IconButton(onClick = { onPlayShuffled(currentOpened.tracks) }) {
+                    IconButton(onClick = onToggleShuffle) {
                         Icon(
-                            Icons.Rounded.Shuffle,
-                            contentDescription = "Aleatorio",
-                            tint = PegoGreen
+                            imageVector = if (shuffleEnabled) {
+                                Icons.Rounded.Shuffle
+                            } else {
+                                Icons.AutoMirrored.Rounded.PlaylistPlay
+                            },
+                            contentDescription = if (shuffleEnabled) "Aleatorio" else "Secuencial",
+                            tint = if (shuffleEnabled) PegoGreen else PegoTextSecondary
                         )
                     }
                     Button(
                         onClick = {
-                            onPlayTrack(currentOpened.tracks.first(), currentOpened.tracks)
+                            val startTrack = if (shuffleEnabled) {
+                                currentOpened.tracks.random()
+                            } else {
+                                currentOpened.tracks.first()
+                            }
+                            onPlayTrack(startTrack, currentOpened.tracks)
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = PegoGreen,

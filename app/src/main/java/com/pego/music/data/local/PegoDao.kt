@@ -125,6 +125,10 @@ interface PegoDao {
     @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
     fun observePlaylistsWithTracks(): Flow<List<PlaylistWithTracks>>
 
+    @Transaction
+    @Query("SELECT * FROM playlists ORDER BY createdAt DESC")
+    suspend fun getPlaylistsWithTracksOnce(): List<PlaylistWithTracks>
+
     @Query("SELECT * FROM playlists WHERE sourceUrl = :sourceUrl LIMIT 1")
     suspend fun getPlaylistBySourceUrl(sourceUrl: String): PlaylistEntity?
 
