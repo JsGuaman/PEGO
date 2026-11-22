@@ -268,6 +268,14 @@ class PlayerController(
         }
     }
 
+    fun replaceResolvedTrack(oldId: String, resolvedTrack: TrackItem) {
+        currentQueue = currentQueue.map { if (it.id == oldId) resolvedTrack else it }
+        trackById = currentQueue.associateBy { it.id }
+        if (_uiState.value.currentTrack?.id == oldId) {
+            _uiState.update { it.copy(currentTrack = resolvedTrack, queue = currentQueue) }
+        }
+    }
+
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }

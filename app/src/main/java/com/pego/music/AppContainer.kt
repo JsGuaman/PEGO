@@ -5,6 +5,7 @@ import com.pego.music.core.network.OkHttpDownloader
 import com.pego.music.data.audio.AudioTrimmer
 import com.pego.music.data.download.DownloadOrchestrator
 import com.pego.music.data.extractor.YouTubeExtractorRepository
+import com.pego.music.data.local.LocalLibraryScanner
 import com.pego.music.data.local.PegoDatabase
 import com.pego.music.data.metadata.LyricsRepository
 import com.pego.music.data.metadata.MetadataEnricher
@@ -18,6 +19,7 @@ class AppContainer(context: Context) {
 
     val httpClient: OkHttpClient = OkHttpDownloader.getInstance().client
     val database: PegoDatabase = PegoDatabase.getInstance(appContext)
+    val localLibraryScanner = LocalLibraryScanner(appContext, database.pegoDao())
     val extractorRepo = YouTubeExtractorRepository()
     val metadataEnricher = MetadataEnricher(httpClient)
     val lyricsRepository = LyricsRepository(httpClient)

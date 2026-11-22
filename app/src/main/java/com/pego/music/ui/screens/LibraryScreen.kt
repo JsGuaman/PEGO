@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.material3.Button
@@ -72,7 +73,8 @@ fun LibraryScreen(
     onDeleteTrack: (TrackItem) -> Unit,
     onRemoveTrackFromPlaylist: (Long, String) -> Unit,
     onDeletePlaylist: (Long) -> Unit,
-    onCreateNewPlaylist: () -> Unit
+    onCreateNewPlaylist: () -> Unit,
+    onSyncLocalLibrary: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var openedPlaylist by remember { mutableStateOf<LocalPlaylist?>(null) }
@@ -170,6 +172,13 @@ fun LibraryScreen(
                 style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                 modifier = Modifier.weight(1f)
             )
+            IconButton(onClick = onSyncLocalLibrary) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = "Escanear música local",
+                    tint = PegoTextSecondary
+                )
+            }
             IconButton(onClick = { uriHandler.openUri("https://ko-fi.com/jsguaman") }) {
                 Icon(
                     imageVector = Icons.Rounded.FavoriteBorder,

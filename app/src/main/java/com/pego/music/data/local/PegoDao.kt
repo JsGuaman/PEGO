@@ -13,6 +13,9 @@ interface PegoDao {
     @Query("SELECT * FROM tracks ORDER BY updatedAt DESC")
     fun observeAllTracks(): Flow<List<TrackEntity>>
 
+    @Query("SELECT * FROM tracks")
+    suspend fun getAllTracksOnce(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE downloadStatus = 'COMPLETED' ORDER BY updatedAt DESC")
     fun observeDownloadedTracks(): Flow<List<TrackEntity>>
 

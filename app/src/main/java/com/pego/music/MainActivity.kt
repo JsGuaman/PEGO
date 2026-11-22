@@ -61,13 +61,15 @@ class MainActivity : ComponentActivity() {
         PegoViewModel.factory((application as PegoApp).container)
     }
 
-    private val requestNotificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val requestRuntimePermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            viewModel.syncLocalLibrary()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        askNotificationPermissionIfNeeded()
+        askRuntimePermissionsIfNeeded()
 
         val initialSharedUrl = extractUrlFromIntent(intent)
 
@@ -86,6 +88,7 @@ class MainActivity : ComponentActivity() {
 
                 val searchState by viewModel.mergedSearchState.collectAsState()
                 val playbackState by viewModel.playbackState.collectAsState()
+                val currentSyncedTrack by viewModel.currentSyncedTrack.collectAsState()
                 val downloadedTracks by viewModel.downloadedTracks.collectAsState()
                 val activeDownloads by viewModel.activeDownloads.collectAsState()
                 val localPlaylists by viewModel.localPlaylists.collectAsState()
@@ -240,7 +243,8 @@ class MainActivity : ComponentActivity() {
                                 onDeleteTrack = { viewModel.deleteDownloadedTrack(it.id) },
                                 onRemoveTrackFromPlaylist = viewModel::removeTrackFromPlaylist,
                                 onDeletePlaylist = viewModel::deletePlaylist,
-                                onCreateNewPlaylist = { showCreatePlaylist = true }
+                                onCreateNewPlaylist = { showCreatePlaylist = true },
+                                onSyncLocalLibrary = { viewModel.syncLocalLibrary(showToast = true) }
                             )
                         }
 
@@ -272,7 +276,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (showFullPlayer && playbackState.currentTrack != null) {
-                    val synced = playbackState.currentTrack?.let { savedTracksMap[it.id] ?: it }
+                    val synced = currentSyncedTrack ?: playbackState.currentTrack
                     FullPlayerSheet(
                         playbackState = playbackState,
                         syncedTrack = synced,
@@ -359,15 +363,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun askNotificationPermissionIfNeeded() {
+    private fun askRuntimePermissionsIfNeeded() {
+        val needed = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
             }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                needed.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+        } else if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+        if (needed.isNotEmpty()) {
+            requestRuntimePermissions.launch(needed.toTypedArray())
         }
     }
 }

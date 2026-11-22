@@ -195,10 +195,20 @@ class PegoViewModel(
         }
     }
 
+    val currentSyncedTrack: StateFlow<TrackItem?> = combine(
+        playbackState.map { it.currentTrack }.distinctUntilChanged(),
+        allSavedTracksMap,
+        _resolvingTrackIds
+    ) { current, savedMap, resolvingIds ->
+        if (current == null) null
+        else syncTrackListWithDownloads(listOf(current), savedMap, resolvingIds).firstOrNull()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     init {
         container.playerController.onTrackTransition = { newTrack ->
             loadLyricsFor(newTrack)
         }
+        syncLocalLibrary()
         viewModelScope.launch {
             downloadedTracks
                 .map { list -> list.map { it.id }.toSet() }
@@ -484,13 +494,14 @@ class PegoViewModel(
                         album = current.album,
                         hdCoverUrl = current.bestCoverUrl
                     )
-                    // Update both recommendations and artist list with resolved YouTube ID
+                    // Update recommendations, artist list, and active player with resolved YouTube ID
                     _rawRecommendations.update { list ->
                         list.map { if (it.id == current.id) merged else it }
                     }
                     _rawArtistRecs.update { list ->
                         list.map { if (it.id == current.id) merged else it }
                     }
+                    container.playerController.replaceResolvedTrack(current.id, merged)
                     merged
                 } else {
                     current
@@ -865,6 +876,20 @@ class PegoViewModel(
                 onComplete(true, null)
             } catch (e: Exception) {
                 onComplete(false, e.message ?: "Error al recortar el audio")
+            }
+        }
+    }
+
+    fun syncLocalLibrary(showToast: Boolean = false) {
+        viewModelScope.launch {
+            val imported = runCatching { container.localLibraryScanner.scanAndImport() }
+                .getOrDefault(0)
+            if (showToast) {
+                _uiMessage.value = if (imported > 0) {
+                    "$imported canciones restauradas desde el dispositivo"
+                } else {
+                    "Biblioteca sincronizada"
+                }
             }
         }
     }
