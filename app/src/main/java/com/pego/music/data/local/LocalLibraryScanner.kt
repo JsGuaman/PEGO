@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.pego.music.data.metadata.TitleCleaner
+import com.pego.music.data.tagger.AudioTagger
 import com.pego.music.domain.model.DownloadStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -229,6 +230,7 @@ class LocalLibraryScanner(
         var durationSec = fallbackDurationSec
 
         runCatching {
+            AudioTagger.ensureAndroidMode()
             val audioFile = AudioFileIO.read(file)
             val tag = audioFile.tag
             if (tag != null) {
@@ -251,13 +253,27 @@ class LocalLibraryScanner(
             }
         }
 
-        if (durationSec <= 0L) {
+        if (coverUriString.isBlank() || durationSec <= 0L) {
             runCatching {
                 val mmr = MediaMetadataRetriever()
-                mmr.setDataSource(file.absolutePath)
-                val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                durationSec = durMs / 1000L
-                mmr.release()
+                try {
+                    mmr.setDataSource(file.absolutePath)
+                    if (durationSec <= 0L) {
+                        val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                        durationSec = durMs / 1000L
+                    }
+                    if (coverUriString.isBlank()) {
+                        val artBytes = mmr.embeddedPicture
+                        if (artBytes != null && artBytes.isNotEmpty()) {
+                            val coverDir = File(context.filesDir, "covers").apply { mkdirs() }
+                            val coverOut = File(coverDir, "${id}.jpg")
+                            coverOut.writeBytes(artBytes)
+                            coverUriString = coverOut.toURI().toString()
+                        }
+                    }
+                } finally {
+                    mmr.release()
+                }
             }
         }
 

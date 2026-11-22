@@ -34,10 +34,14 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URI
+import java.util.concurrent.atomic.AtomicInteger
 
 data class SearchUiState(
     val query: String = "",
@@ -104,6 +108,7 @@ class PegoViewModel(
     private var enrichJob: Job? = null
     private var recommendJob: Job? = null
     private var artistJob: Job? = null
+    private var syncJob: Job? = null
     private var searchGeneration = 0L
 
     val playbackState: StateFlow<PlaybackUiState> = container.playerController.uiState
@@ -881,7 +886,8 @@ class PegoViewModel(
     }
 
     fun syncLocalLibrary(showToast: Boolean = false) {
-        viewModelScope.launch {
+        if (syncJob?.isActive == true) return
+        syncJob = viewModelScope.launch {
             val imported = runCatching { container.localLibraryScanner.scanAndImport() }
                 .getOrDefault(0)
             if (showToast) {
@@ -890,6 +896,128 @@ class PegoViewModel(
                 } else {
                     "Biblioteca sincronizada"
                 }
+            }
+            val recoveredCovers = runCatching { backfillMissingCovers() }.getOrDefault(0)
+            if (recoveredCovers > 0) {
+                _uiMessage.value = "$recoveredCovers portadas restauradas"
+            }
+        }
+    }
+
+    /**
+     * Non-destructively restores missing cover art for downloaded tracks (preserving track IDs,
+     * playlists, and lyrics): extracts embedded MP4 art if present, or fetches verified HD art
+     * (PSNR >= 20 dB), caches it offline, and embeds it back into writable .m4a files.
+     */
+    private suspend fun backfillMissingCovers(): Int = withContext(Dispatchers.IO) {
+        val candidates = dao.getAllTracksOnce()
+            .filter { entity ->
+                entity.downloadStatus == DownloadStatus.COMPLETED.name &&
+                    !hasReadableCover(entity.hdCoverUrl, entity.thumbnailUrl)
+            }
+        if (candidates.isEmpty()) return@withContext 0
+
+        val semaphore = Semaphore(3)
+        val recovered = AtomicInteger(0)
+
+        kotlinx.coroutines.coroutineScope {
+            candidates.map { entity ->
+                async {
+                    semaphore.withPermit {
+                        val track = entity.toDomain()
+                        val embedded = container.audioTagger.extractExistingCover(track)
+                        if (embedded != null) {
+                            try {
+                                val persisted = container.audioTagger.persistCoverFile(track.id, embedded)
+                                if (!persisted.isNullOrBlank()) {
+                                    dao.updateTrackCoverUrl(track.id, persisted)
+                                    refreshActivePlayerCover(track, persisted)
+                                    recovered.incrementAndGet()
+                                    return@withPermit
+                                }
+                            } finally {
+                                embedded.delete()
+                            }
+                        }
+
+                        val fetchedCover = fetchAndValidateCoverFile(track) ?: return@withPermit
+                        try {
+                            val persisted = container.audioTagger.persistCoverFile(track.id, fetchedCover)
+                                ?: return@withPermit
+                            container.audioTagger.tryEmbedCoverInExistingTrack(track, fetchedCover)
+                            dao.updateTrackCoverUrl(track.id, persisted)
+                            refreshActivePlayerCover(track, persisted)
+                            recovered.incrementAndGet()
+                        } finally {
+                            fetchedCover.delete()
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+
+        recovered.get()
+    }
+
+    private fun hasReadableCover(hdCoverUrl: String, thumbnailUrl: String): Boolean {
+        val best = hdCoverUrl.ifBlank { thumbnailUrl }
+        if (best.isBlank()) return false
+        if (best.startsWith("http://") || best.startsWith("https://")) return true
+        if (best.startsWith("file://")) {
+            val file = runCatching { File(URI(best)) }.getOrNull() ?: return false
+            return file.exists() && file.length() > 0L
+        }
+        return true
+    }
+
+    private suspend fun fetchAndValidateCoverFile(track: TrackItem): File? {
+        val cleanArtist = if (track.artist.equals("Artista desconocido", ignoreCase = true)) {
+            ""
+        } else {
+            track.artist
+        }
+        val cleanTitle = track.cleanTitle.ifBlank { track.title }
+        val enriched = runCatching {
+            container.metadataEnricher.enrich(cleanTitle, cleanArtist)
+        }.getOrNull()
+
+        val primaryUrl = enriched?.coverUrl?.takeIf { it.isNotBlank() }
+        if (primaryUrl != null) {
+            tryDownloadAcceptableCover(primaryUrl, track.id)?.let { return it }
+        }
+
+        val query = "$cleanArtist $cleanTitle".trim()
+        val candidateUrls = runCatching { container.metadataEnricher.searchCoverCandidates(query) }
+            .getOrDefault(emptyList())
+            .map { it.imageUrl }
+            .filter { it.isNotBlank() && it != primaryUrl }
+            .distinct()
+            .take(3)
+
+        for (url in candidateUrls) {
+            tryDownloadAcceptableCover(url, track.id)?.let { return it }
+        }
+        return null
+    }
+
+    private fun tryDownloadAcceptableCover(url: String, trackId: String): File? {
+        val tempFile = File(container.appContext.cacheDir, "backfill_cover_${trackId}.jpg")
+        val ok = downloadFileTo(url, tempFile)
+        val quality = if (ok) ImageQualityEvaluator.evaluateFile(tempFile) else null
+        if (quality != null && quality.isAcceptable) {
+            return tempFile
+        }
+        tempFile.delete()
+        return null
+    }
+
+    private suspend fun refreshActivePlayerCover(track: TrackItem, coverUrl: String) {
+        if (playbackState.value.currentTrack?.id == track.id) {
+            withContext(Dispatchers.Main) {
+                container.playerController.refreshTrackMetadata(
+                    track.copy(hdCoverUrl = coverUrl),
+                    replayAudio = false
+                )
             }
         }
     }

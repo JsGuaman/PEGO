@@ -2,6 +2,9 @@ package com.pego.music.data.tagger
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -13,7 +16,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
+import org.jaudiotagger.tag.TagOptionSingleton
+import org.jaudiotagger.tag.images.Artwork
 import org.jaudiotagger.tag.images.ArtworkFactory
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -24,6 +30,10 @@ data class SavedAudioResult(
 )
 
 class AudioTagger(private val context: Context) {
+
+    init {
+        ensureAndroidMode()
+    }
 
     /**
      * Embeds ID3/MP4 metadata + square album art into [tempAudioFile] using JAudiotagger,
@@ -93,24 +103,122 @@ class AudioTagger(private val context: Context) {
             }
         }
 
-    private fun extractExistingCover(track: TrackItem): File? {
-        val localSource = track.localFilePath?.let(::File)?.takeIf { it.exists() }
-            ?: track.localUri?.let { uriStr ->
+    fun extractExistingCover(track: TrackItem): File? {
+        val directFile = track.localFilePath?.let(::File)?.takeIf { it.exists() }
+        var tempCopy: File? = null
+        val localSource = directFile ?: run {
+            val uriStr = track.localUri?.takeIf { it.isNotBlank() } ?: return null
+            val parsed = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return null
+            if (parsed.scheme == "file") {
+                parsed.path?.let(::File)?.takeIf { it.exists() }
+            } else {
                 runCatching {
                     val temp = File(context.cacheDir, "orig_audio_${track.id}.m4a")
-                    context.contentResolver.openInputStream(Uri.parse(uriStr))?.use { input ->
+                    context.contentResolver.openInputStream(parsed)?.use { input ->
                         FileOutputStream(temp).use { output -> input.copyTo(output) }
                     }
-                    temp.takeIf { it.exists() && it.length() > 0L }
+                    temp.takeIf { it.exists() && it.length() > 0L }?.also { tempCopy = it }
                 }.getOrNull()
-            } ?: return null
+            }
+        } ?: return null
 
+        try {
+            val jAudioBytes = runCatching {
+                ensureAndroidMode()
+                AudioFileIO.read(localSource).tag?.firstArtwork?.binaryData
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
+
+            val artBytes = jAudioBytes ?: runCatching {
+                val mmr = MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(localSource.absolutePath)
+                    mmr.embeddedPicture
+                } finally {
+                    mmr.release()
+                }
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
+
+            if (artBytes != null) {
+                val out = File(context.cacheDir, "extracted_cover_${track.id}.jpg")
+                out.writeBytes(artBytes)
+                return out
+            }
+            return null
+        } finally {
+            tempCopy?.delete()
+        }
+    }
+
+    /**
+     * Safely attempts to embed [coverFile] (and current track tags) into an existing local .m4a
+     * without ever creating duplicate files if Scoped Storage denies write access.
+     */
+    suspend fun tryEmbedCoverInExistingTrack(track: TrackItem, coverFile: File): Boolean =
+        withContext(Dispatchers.IO) {
+            if (!coverFile.exists() || coverFile.length() == 0L) return@withContext false
+            val sourceUri = track.localUri?.takeIf { it.isNotBlank() }
+                ?: track.localFilePath?.let { File(it).toURI().toString() }
+                ?: return@withContext false
+
+            val tempAudio = copyUriToTempFile(sourceUri, "backfill_${track.id}", "m4a")
+                ?: return@withContext false
+
+            try {
+                val metadata = EnrichedMetadata(
+                    title = track.cleanTitle.ifBlank { track.title },
+                    artist = track.artist,
+                    album = track.album,
+                    year = track.year,
+                    coverUrl = track.bestCoverUrl
+                )
+                val tagged = applyTags(tempAudio, coverFile, metadata)
+                if (!tagged || tempAudio.length() <= 0L) return@withContext false
+
+                // Sanity-check that the resulting file still reads cleanly before overwriting
+                val verified = runCatching {
+                    ensureAndroidMode()
+                    val check = AudioFileIO.read(tempAudio)
+                    check.tag?.firstArtwork?.binaryData?.isNotEmpty() == true
+                }.getOrDefault(false)
+                if (!verified) return@withContext false
+
+                val existingUri = track.localUri?.takeIf { it.startsWith("content://") }?.let(Uri::parse)
+                if (existingUri != null) {
+                    val written = runCatching {
+                        context.contentResolver.openOutputStream(existingUri, "wt")?.use { out ->
+                            FileInputStream(tempAudio).use { input -> input.copyTo(out) }
+                        } != null
+                    }.getOrDefault(false)
+                    if (written) return@withContext true
+                }
+
+                val existingPath = track.localFilePath?.let(::File)
+                if (existingPath != null && existingPath.exists() && existingPath.canWrite()) {
+                    return@withContext runCatching {
+                        tempAudio.copyTo(existingPath, overwrite = true)
+                        MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(existingPath.absolutePath),
+                            arrayOf("audio/mp4"),
+                            null
+                        )
+                        true
+                    }.getOrDefault(false)
+                }
+
+                false
+            } finally {
+                tempAudio.delete()
+            }
+        }
+
+    fun persistCoverFile(trackId: String, coverFile: File): String? {
+        if (!coverFile.exists() || coverFile.length() == 0L) return null
         return runCatching {
-            val audioFile = AudioFileIO.read(localSource)
-            val bytes = audioFile.tag?.firstArtwork?.binaryData ?: return@runCatching null
-            val out = File(context.cacheDir, "extracted_cover_${track.id}.jpg")
-            out.writeBytes(bytes)
-            out
+            val coverDir = File(context.filesDir, "covers").apply { mkdirs() }
+            val destCover = File(coverDir, "$trackId.jpg")
+            coverFile.copyTo(destCover, overwrite = true)
+            destCover.toURI().toString()
         }.getOrNull()
     }
 
@@ -119,8 +227,9 @@ class AudioTagger(private val context: Context) {
         coverFile: File?,
         metadata: EnrichedMetadata,
         lyricsText: String? = null
-    ) {
-        runCatching {
+    ): Boolean {
+        return runCatching {
+            ensureAndroidMode()
             val audioFile = AudioFileIO.read(audioFileTarget)
             val tag = audioFile.tagOrCreateAndSetDefault
             if (metadata.title.isNotBlank()) tag.setField(FieldKey.TITLE, metadata.title)
@@ -129,12 +238,58 @@ class AudioTagger(private val context: Context) {
             if (metadata.year.isNotBlank()) tag.setField(FieldKey.YEAR, metadata.year)
             if (!lyricsText.isNullOrBlank()) tag.setField(FieldKey.LYRICS, lyricsText)
 
-            if (coverFile != null && coverFile.exists() && coverFile.length() > 0) {
-                val artwork = ArtworkFactory.createArtworkFromFile(coverFile)
-                tag.deleteArtworkField()
-                tag.setField(artwork)
+            if (coverFile != null && coverFile.exists() && coverFile.length() > 0L) {
+                val artwork = buildAndroidArtwork(coverFile)
+                if (artwork != null) {
+                    tag.deleteArtworkField()
+                    tag.setField(artwork)
+                }
             }
             audioFile.commit()
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Builds JAudiotagger Artwork without calling javax.imageio.ImageIO (which crashes on Android).
+     * Normalizes non-JPEG/PNG images (e.g., WebP) into JPEG so MP4 covr atoms stay universally readable.
+     */
+    private fun buildAndroidArtwork(coverFile: File): Artwork? {
+        return runCatching {
+            val rawBytes = coverFile.readBytes()
+            if (rawBytes.isEmpty()) return@runCatching null
+
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+
+            val (finalBytes, mimeType) = when (bounds.outMimeType) {
+                "image/jpeg" -> rawBytes to "image/jpeg"
+                "image/png" -> rawBytes to "image/png"
+                else -> {
+                    val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+                        ?: return@runCatching null
+                    val baos = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 92, baos)
+                    bitmap.recycle()
+                    baos.toByteArray() to "image/jpeg"
+                }
+            }
+
+            ArtworkFactory.getNew().apply {
+                binaryData = finalBytes
+                this.mimeType = mimeType
+                pictureType = 3
+                if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    width = bounds.outWidth
+                    height = bounds.outHeight
+                }
+            }
+        }.getOrNull()
+    }
+
+    companion object {
+        fun ensureAndroidMode() {
+            TagOptionSingleton.getInstance().setAndroid(true)
         }
     }
 

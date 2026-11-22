@@ -88,6 +88,12 @@ interface PegoDao {
         updatedAt: Long = System.currentTimeMillis()
     )
 
+    @Query("UPDATE tracks SET hdCoverUrl = :hdCoverUrl WHERE id = :trackId")
+    suspend fun updateTrackCoverUrl(
+        trackId: String,
+        hdCoverUrl: String
+    )
+
     @Query("UPDATE tracks SET durationSeconds = :durationSeconds, localUri = :localUri, localFilePath = :localFilePath, updatedAt = :updatedAt WHERE id = :trackId")
     suspend fun updateTrackTrimmed(
         trackId: String,
