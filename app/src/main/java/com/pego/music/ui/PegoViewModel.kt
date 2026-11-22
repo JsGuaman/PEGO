@@ -1,5 +1,6 @@
 package com.pego.music.ui
 
+import android.media.MediaScannerConnection
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -647,8 +648,60 @@ class PegoViewModel(
 
     fun deleteDownloadedTrack(trackId: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            val existing = dao.getTrackById(trackId)
+            container.localLibraryScanner.markDeleted(existing?.localUri, existing?.localFilePath)
+            container.downloadOrchestrator.cancelOrRemoveTrack(trackId)
+
+            existing?.let { deleteLocalTrackFiles(it) }
+
             dao.removeTrackFromAllPlaylists(trackId)
             dao.deleteTrack(trackId)
+            _uiMessage.value = "Canción eliminada"
+        }
+    }
+
+    private fun deleteLocalTrackFiles(entity: TrackEntity) {
+        val coversDir = File(container.appContext.filesDir, "covers")
+        File(coversDir, "${entity.id}.jpg").delete()
+        if (entity.hdCoverUrl.startsWith("file://")) {
+            runCatching {
+                val coverFile = File(URI(entity.hdCoverUrl))
+                if (coverFile.parentFile == coversDir) {
+                    coverFile.delete()
+                }
+            }
+        }
+
+        entity.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
+            runCatching {
+                val audioFile = File(path)
+                if (audioFile.exists() && audioFile.delete()) {
+                    MediaScannerConnection.scanFile(
+                        container.appContext,
+                        arrayOf(audioFile.absolutePath),
+                        null,
+                        null
+                    )
+                }
+            }
+        }
+
+        entity.localUri?.takeIf { it.isNotBlank() }?.let { uriStr ->
+            when {
+                uriStr.startsWith("content://") -> {
+                    runCatching {
+                        container.appContext.contentResolver.delete(Uri.parse(uriStr), null, null)
+                    }
+                }
+                uriStr.startsWith("file://") -> {
+                    runCatching {
+                        val audioFile = File(URI(uriStr))
+                        if (audioFile.exists()) {
+                            audioFile.delete()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -924,10 +977,12 @@ class PegoViewModel(
             candidates.map { entity ->
                 async {
                     semaphore.withPermit {
+                        if (dao.getTrackById(entity.id) == null) return@withPermit
                         val track = entity.toDomain()
                         val embedded = container.audioTagger.extractExistingCover(track)
                         if (embedded != null) {
                             try {
+                                if (dao.getTrackById(track.id) == null) return@withPermit
                                 val persisted = container.audioTagger.persistCoverFile(track.id, embedded)
                                 if (!persisted.isNullOrBlank()) {
                                     dao.updateTrackCoverUrl(track.id, persisted)
@@ -942,6 +997,7 @@ class PegoViewModel(
 
                         val fetchedCover = fetchAndValidateCoverFile(track) ?: return@withPermit
                         try {
+                            if (dao.getTrackById(track.id) == null) return@withPermit
                             val persisted = container.audioTagger.persistCoverFile(track.id, fetchedCover)
                                 ?: return@withPermit
                             container.audioTagger.tryEmbedCoverInExistingTrack(track, fetchedCover)

@@ -27,6 +27,50 @@ class LocalLibraryScanner(
     private val dao: PegoDao
 ) {
 
+    private val prefsLock = Any()
+    private val deletedPrefs by lazy {
+        context.getSharedPreferences(PREFS_DELETED_TRACKS, Context.MODE_PRIVATE)
+    }
+
+    /**
+     * Records a user-deleted local audio file so [scanAndImport] never resurrects it if
+     * Scoped Storage denies silent MediaStore deletion for pre-reinstall files.
+     */
+    fun markDeleted(localUri: String?, localFilePath: String?) {
+        val cleanUri = localUri?.takeIf { it.isNotBlank() }
+        val cleanPath = localFilePath?.takeIf { it.isNotBlank() }
+        val mediaId = cleanUri
+            ?.takeIf { it.startsWith("content://") }
+            ?.let { runCatching { ContentUris.parseId(Uri.parse(it)).toString() }.getOrNull() }
+
+        if (cleanUri == null && cleanPath == null && mediaId == null) return
+
+        synchronized(prefsLock) {
+            val uris = (deletedPrefs.getStringSet(KEY_DELETED_URIS, emptySet()) ?: emptySet()).toMutableSet()
+            val mediaIds = (deletedPrefs.getStringSet(KEY_DELETED_MEDIA_IDS, emptySet()) ?: emptySet()).toMutableSet()
+            val paths = (deletedPrefs.getStringSet(KEY_DELETED_PATHS, emptySet()) ?: emptySet()).toMutableSet()
+
+            cleanUri?.let { uris.add(it) }
+            mediaId?.let { mediaIds.add(it) }
+            cleanPath?.let { paths.add(it) }
+
+            deletedPrefs.edit()
+                .putStringSet(KEY_DELETED_URIS, uris)
+                .putStringSet(KEY_DELETED_MEDIA_IDS, mediaIds)
+                .putStringSet(KEY_DELETED_PATHS, paths)
+                .commit()
+        }
+    }
+
+    private fun readDeletedTombstones(): Triple<Set<String>, Set<String>, Set<String>> {
+        synchronized(prefsLock) {
+            val uris = deletedPrefs.getStringSet(KEY_DELETED_URIS, emptySet())?.toSet() ?: emptySet()
+            val mediaIds = deletedPrefs.getStringSet(KEY_DELETED_MEDIA_IDS, emptySet())?.toSet() ?: emptySet()
+            val paths = deletedPrefs.getStringSet(KEY_DELETED_PATHS, emptySet())?.toSet() ?: emptySet()
+            return Triple(uris, mediaIds, paths)
+        }
+    }
+
     suspend fun scanAndImport(): Int = withContext(Dispatchers.IO) {
         val existingTracks = dao.getAllTracksOnce()
         val existingUris = existingTracks.mapNotNull { it.localUri }.toHashSet()
@@ -35,11 +79,12 @@ class LocalLibraryScanner(
             .filter { it.downloadStatus == DownloadStatus.COMPLETED.name }
             .map { TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}") }
             .toHashSet()
+        val (deletedUris, deletedMediaIds, deletedPaths) = readDeletedTombstones()
 
         var importedCount = 0
 
         // 1. Scan MediaStore public Music/PEGO folder
-        importedCount += scanMediaStore(existingUris, existingKeys)
+        importedCount += scanMediaStore(existingUris, existingKeys, deletedUris, deletedMediaIds)
 
         // 2. Scan app-specific external Music/PEGO folder (API < 29 fallback)
         val appMusicDir = File(
@@ -48,7 +93,13 @@ class LocalLibraryScanner(
         )
         if (appMusicDir.exists() && appMusicDir.isDirectory) {
             appMusicDir.listFiles()?.forEach { file ->
-                if (file.isFile && isSupportedAudio(file.name) && file.absolutePath !in existingPaths) {
+                if (
+                    file.isFile &&
+                    isSupportedAudio(file.name) &&
+                    file.absolutePath !in existingPaths &&
+                    file.absolutePath !in deletedPaths &&
+                    file.toURI().toString() !in deletedUris
+                ) {
                     val entity = buildEntityFromFile(
                         file = file,
                         id = "local_file_${file.name.hashCode()}",
@@ -71,7 +122,9 @@ class LocalLibraryScanner(
 
     private suspend fun scanMediaStore(
         existingUris: MutableSet<String>,
-        existingKeys: MutableSet<String>
+        existingKeys: MutableSet<String>,
+        deletedUris: Set<String>,
+        deletedMediaIds: Set<String>
     ): Int {
         var count = 0
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -128,7 +181,13 @@ class LocalLibraryScanner(
                         mediaId
                     )
                     val uriString = contentUri.toString()
-                    if (uriString in existingUris) continue
+                    if (
+                        uriString in existingUris ||
+                        uriString in deletedUris ||
+                        mediaId.toString() in deletedMediaIds
+                    ) {
+                        continue
+                    }
 
                     val displayName = cursor.getString(nameCol).orEmpty()
                     if (!isSupportedAudio(displayName)) continue
@@ -344,5 +403,12 @@ class LocalLibraryScanner(
         val lower = fileName.lowercase()
         return lower.endsWith(".m4a") || lower.endsWith(".mp3") ||
             lower.endsWith(".flac") || lower.endsWith(".ogg") || lower.endsWith(".opus")
+    }
+
+    companion object {
+        private const val PREFS_DELETED_TRACKS = "pego_deleted_local_tracks"
+        private const val KEY_DELETED_URIS = "deleted_uris"
+        private const val KEY_DELETED_MEDIA_IDS = "deleted_media_ids"
+        private const val KEY_DELETED_PATHS = "deleted_paths"
     }
 }
