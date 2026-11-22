@@ -46,6 +46,8 @@ interface PegoDao {
             hdCoverUrl = :hdCoverUrl,
             localFilePath = :localFilePath,
             localUri = :localUri,
+            plainLyrics = :plainLyrics,
+            syncedLyrics = :syncedLyrics,
             downloadStatus = :status,
             downloadProgress = 100,
             updatedAt = :updatedAt
@@ -61,8 +63,17 @@ interface PegoDao {
         hdCoverUrl: String,
         localFilePath: String?,
         localUri: String?,
+        plainLyrics: String?,
+        syncedLyrics: String?,
         status: String = "COMPLETED",
         updatedAt: Long = System.currentTimeMillis()
+    )
+
+    @Query("UPDATE tracks SET plainLyrics = :plainLyrics, syncedLyrics = :syncedLyrics WHERE id = :trackId")
+    suspend fun updateTrackLyrics(
+        trackId: String,
+        plainLyrics: String?,
+        syncedLyrics: String?
     )
 
     @Query("UPDATE tracks SET hdCoverUrl = :hdCoverUrl, localUri = :localUri, localFilePath = :localFilePath, updatedAt = :updatedAt WHERE id = :trackId")

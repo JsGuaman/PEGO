@@ -24,6 +24,8 @@ data class TrackEntity(
     val sourceUrl: String,
     val localFilePath: String? = null,
     val localUri: String? = null,
+    val plainLyrics: String? = null,
+    val syncedLyrics: String? = null,
     val downloadStatus: String = DownloadStatus.NONE.name,
     val downloadProgress: Int = 0,
     val updatedAt: Long = System.currentTimeMillis()
@@ -41,6 +43,8 @@ data class TrackEntity(
         sourceUrl = sourceUrl,
         localFilePath = localFilePath,
         localUri = localUri,
+        plainLyrics = plainLyrics,
+        syncedLyrics = syncedLyrics,
         downloadStatus = runCatching { DownloadStatus.valueOf(downloadStatus) }
             .getOrDefault(DownloadStatus.NONE),
         downloadProgress = downloadProgress
@@ -60,6 +64,8 @@ data class TrackEntity(
             sourceUrl = track.sourceUrl,
             localFilePath = track.localFilePath,
             localUri = track.localUri,
+            plainLyrics = track.plainLyrics,
+            syncedLyrics = track.syncedLyrics,
             downloadStatus = track.downloadStatus.name,
             downloadProgress = track.downloadProgress
         )

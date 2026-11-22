@@ -95,6 +95,7 @@ class PegoViewModel(
     private val _selectedArtistName = MutableStateFlow<String?>(null)
     private val _rawArtistRecs = MutableStateFlow<List<TrackItem>>(emptyList())
     private val _isLoadingArtistRecs = MutableStateFlow(false)
+    private val _resolvingTrackIds = MutableStateFlow<Set<String>>(emptySet())
 
     private val _uiMessage = MutableStateFlow<String?>(null)
     val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
@@ -124,39 +125,25 @@ class PegoViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
-     * Syncs recommendation download status with Room (matching by ID or normalized artist+title).
+     * Syncs recommendation download status with Room (matching by ID or normalized artist+title)
+     * plus in-flight YouTube resolution IDs so the progress spinner appears immediately.
      */
     val recommendations: StateFlow<List<TrackItem>> = combine(
         _rawRecommendations,
-        allSavedTracksMap
-    ) { recs, savedMap ->
-        val byNormalized = savedMap.values.associateBy {
-            TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}")
-        }
-        recs.map { rec ->
-            val match = savedMap[rec.id]
-                ?: byNormalized[TitleCleaner.normalizeForMatching("${rec.artist} ${rec.cleanTitle}")]
-            if (match != null) {
-                rec.copy(
-                    id = match.id,
-                    sourceUrl = match.sourceUrl.ifBlank { rec.sourceUrl },
-                    downloadStatus = match.downloadStatus,
-                    downloadProgress = match.downloadProgress,
-                    localUri = match.localUri,
-                    localFilePath = match.localFilePath,
-                    hdCoverUrl = rec.hdCoverUrl.ifBlank { match.hdCoverUrl }
-                )
-            } else rec
-        }
+        allSavedTracksMap,
+        _resolvingTrackIds
+    ) { recs, savedMap, resolvingIds ->
+        syncTrackListWithDownloads(recs, savedMap, resolvingIds)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val artistState: StateFlow<ArtistUiState?> = combine(
-        _selectedArtistName,
+        combine(_selectedArtistName, _rawArtistRecs, _isLoadingArtistRecs) { name, recs, loading ->
+            Triple(name, recs, loading)
+        },
         downloadedTracks,
-        _rawArtistRecs,
-        _isLoadingArtistRecs,
-        allSavedTracksMap
-    ) { artistName, downloaded, rawRecs, loadingRecs, savedMap ->
+        allSavedTracksMap,
+        _resolvingTrackIds
+    ) { (artistName, rawRecs, loadingRecs), downloaded, savedMap, resolvingIds ->
         if (artistName.isNullOrBlank()) return@combine null
 
         val downloadedOfArtist = downloaded.filter { track ->
@@ -166,24 +153,7 @@ class PegoViewModel(
                 candidateTitle = track.title
             )
         }
-        val byNormalized = savedMap.values.associateBy {
-            TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}")
-        }
-        val syncedRecs = rawRecs.map { rec ->
-            val match = savedMap[rec.id]
-                ?: byNormalized[TitleCleaner.normalizeForMatching("${rec.artist} ${rec.cleanTitle}")]
-            if (match != null) {
-                rec.copy(
-                    id = match.id,
-                    sourceUrl = match.sourceUrl.ifBlank { rec.sourceUrl },
-                    downloadStatus = match.downloadStatus,
-                    downloadProgress = match.downloadProgress,
-                    localUri = match.localUri,
-                    localFilePath = match.localFilePath,
-                    hdCoverUrl = rec.hdCoverUrl.ifBlank { match.hdCoverUrl }
-                )
-            } else rec
-        }
+        val syncedRecs = syncTrackListWithDownloads(rawRecs, savedMap, resolvingIds)
 
         ArtistUiState(
             artistName = artistName,
@@ -193,7 +163,42 @@ class PegoViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    private fun syncTrackListWithDownloads(
+        tracks: List<TrackItem>,
+        savedMap: Map<String, TrackItem>,
+        resolvingIds: Set<String>
+    ): List<TrackItem> {
+        val byNormalized = savedMap.values.associateBy {
+            TitleCleaner.normalizeForMatching("${it.artist} ${it.cleanTitle.ifBlank { it.title }}")
+        }
+        return tracks.map { rec ->
+            val match = savedMap[rec.id]
+                ?: byNormalized[TitleCleaner.normalizeForMatching("${rec.artist} ${rec.cleanTitle}")]
+            when {
+                match != null -> rec.copy(
+                    id = match.id,
+                    sourceUrl = match.sourceUrl.ifBlank { rec.sourceUrl },
+                    downloadStatus = match.downloadStatus,
+                    downloadProgress = match.downloadProgress,
+                    localUri = match.localUri,
+                    localFilePath = match.localFilePath,
+                    plainLyrics = match.plainLyrics ?: rec.plainLyrics,
+                    syncedLyrics = match.syncedLyrics ?: rec.syncedLyrics,
+                    hdCoverUrl = rec.hdCoverUrl.ifBlank { match.hdCoverUrl }
+                )
+                rec.id in resolvingIds -> rec.copy(
+                    downloadStatus = DownloadStatus.QUEUED,
+                    downloadProgress = 0
+                )
+                else -> rec
+            }
+        }
+    }
+
     init {
+        container.playerController.onTrackTransition = { newTrack ->
+            loadLyricsFor(newTrack)
+        }
         viewModelScope.launch {
             downloadedTracks
                 .map { list -> list.map { it.id }.toSet() }
@@ -448,7 +453,8 @@ class PegoViewModel(
 
     fun downloadSingleTrack(track: TrackItem) {
         val current = allSavedTracksMap.value[track.id] ?: track
-        if (current.downloadStatus == DownloadStatus.COMPLETED ||
+        if (current.id in _resolvingTrackIds.value ||
+            current.downloadStatus == DownloadStatus.COMPLETED ||
             current.downloadStatus == DownloadStatus.QUEUED ||
             current.downloadStatus == DownloadStatus.DOWNLOADING ||
             current.downloadStatus == DownloadStatus.TAGGING
@@ -457,38 +463,46 @@ class PegoViewModel(
         }
 
         viewModelScope.launch {
-            val resolved = if (current.sourceUrl.isBlank()) {
-                val ytMatch = runCatching {
-                    container.extractorRepo.searchMusic(
-                        query = "${current.artist} ${current.cleanTitle}",
-                        originalsOnly = true
-                    ).firstOrNull()
-                }.getOrNull()
+            _resolvingTrackIds.update { it + current.id }
+            try {
+                val resolved = if (current.sourceUrl.isBlank()) {
+                    val ytMatch = runCatching {
+                        container.extractorRepo.searchMusic(
+                            query = "${current.artist} ${current.cleanTitle}",
+                            originalsOnly = true
+                        ).firstOrNull()
+                    }.getOrNull()
 
-                if (ytMatch == null) {
-                    _uiMessage.value = "No se encontró fuente descargable para ${current.cleanTitle}"
+                    if (ytMatch == null) {
+                        _uiMessage.value = "No se encontró fuente descargable para ${current.cleanTitle}"
+                        return@launch
+                    }
+
+                    val merged = ytMatch.copy(
+                        cleanTitle = current.cleanTitle,
+                        artist = current.artist,
+                        album = current.album,
+                        hdCoverUrl = current.bestCoverUrl
+                    )
+                    // Update both recommendations and artist list with resolved YouTube ID
+                    _rawRecommendations.update { list ->
+                        list.map { if (it.id == current.id) merged else it }
+                    }
+                    _rawArtistRecs.update { list ->
+                        list.map { if (it.id == current.id) merged else it }
+                    }
+                    merged
+                } else {
+                    current
+                }
+
+                if ((allSavedTracksMap.value[resolved.id]?.downloadStatus) == DownloadStatus.COMPLETED) {
                     return@launch
                 }
-
-                val merged = ytMatch.copy(
-                    cleanTitle = current.cleanTitle,
-                    artist = current.artist,
-                    album = current.album,
-                    hdCoverUrl = current.bestCoverUrl
-                )
-                // Update recommendation entry with resolved YouTube ID so progress shows on card
-                _rawRecommendations.update { list ->
-                    list.map { if (it.id == current.id) merged else it }
-                }
-                merged
-            } else {
-                current
+                container.downloadOrchestrator.enqueueSingleTrack(resolved)
+            } finally {
+                _resolvingTrackIds.update { it - current.id }
             }
-
-            if ((allSavedTracksMap.value[resolved.id]?.downloadStatus) == DownloadStatus.COMPLETED) {
-                return@launch
-            }
-            container.downloadOrchestrator.enqueueSingleTrack(resolved)
         }
     }
 
@@ -639,14 +653,33 @@ class PegoViewModel(
     fun cycleRepeatMode() = container.playerController.cycleRepeatMode()
 
     fun loadLyricsFor(track: TrackItem) {
-        viewModelScope.launch {
-            _isLoadingLyrics.value = true
-            _lyricsState.value = container.lyricsRepository.fetchLyrics(
-                artist = track.artist,
-                title = track.cleanTitle.ifBlank { track.title },
-                durationSeconds = track.durationSeconds
+        val synced = allSavedTracksMap.value[track.id] ?: track
+        if (!synced.plainLyrics.isNullOrBlank() || !synced.syncedLyrics.isNullOrBlank()) {
+            _lyricsState.value = LyricsResult(
+                plainLyrics = synced.plainLyrics,
+                syncedLyrics = synced.syncedLyrics
             )
             _isLoadingLyrics.value = false
+            return
+        }
+
+        viewModelScope.launch {
+            _isLoadingLyrics.value = true
+            val fetched = container.lyricsRepository.fetchLyrics(
+                artist = synced.artist,
+                title = synced.cleanTitle.ifBlank { synced.title },
+                durationSeconds = synced.durationSeconds
+            )
+            _lyricsState.value = fetched
+            _isLoadingLyrics.value = false
+
+            if (fetched != null && synced.isDownloaded &&
+                (!fetched.plainLyrics.isNullOrBlank() || !fetched.syncedLyrics.isNullOrBlank())
+            ) {
+                withContext(Dispatchers.IO) {
+                    dao.updateTrackLyrics(synced.id, fetched.plainLyrics, fetched.syncedLyrics)
+                }
+            }
         }
     }
 

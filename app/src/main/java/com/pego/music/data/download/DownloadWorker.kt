@@ -14,6 +14,7 @@ import com.pego.music.core.image.ImageQualityEvaluator
 import com.pego.music.core.network.OkHttpDownloader
 import com.pego.music.domain.model.DownloadStatus
 import com.pego.music.domain.model.EnrichedMetadata
+import com.pego.music.domain.model.LyricsResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -50,9 +51,11 @@ class DownloadWorker(
         val container = app.container
         val dao = container.database.pegoDao()
 
-        if (dao.getTrackById(trackId)?.downloadStatus == DownloadStatus.COMPLETED.name) {
+        val existingTrack = dao.getTrackById(trackId)
+        if (existingTrack?.downloadStatus == DownloadStatus.COMPLETED.name) {
             return Result.success()
         }
+        val durationSeconds = existingTrack?.durationSeconds ?: 0L
 
         val notificationId = abs(trackId.hashCode()).coerceAtLeast(1000)
 
@@ -66,10 +69,18 @@ class DownloadWorker(
 
             lateinit var enriched: EnrichedMetadata
             var coverUrl = fallbackThumb
+            var lyricsResult: LyricsResult? = null
 
             coroutineScope {
                 val metadataDeferred = async(Dispatchers.IO) {
                     val meta = container.metadataEnricher.enrich(rawTitle, rawArtist)
+                    val lyricsDeferred = async {
+                        container.lyricsRepository.fetchLyrics(
+                            artist = meta.artist.ifBlank { rawArtist },
+                            title = meta.title.ifBlank { rawTitle },
+                            durationSeconds = durationSeconds
+                        )
+                    }
                     val candidates = listOf(meta.coverUrl, fallbackThumb)
                         .filter { it.isNotBlank() }
                         .distinct()
@@ -95,7 +106,7 @@ class DownloadWorker(
                         coverTarget.delete()
                     }
 
-                    Triple(meta, acceptedCoverUrl, acceptedCoverFile)
+                    Triple(meta, acceptedCoverUrl, acceptedCoverFile) to lyricsDeferred.await()
                 }
 
                 val streamUrl = container.extractorRepo.resolveBestM4aAudioUrl(sourceUrl)
@@ -112,10 +123,11 @@ class DownloadWorker(
                     setForeground(createForegroundInfo(notificationId, rawTitle, scaled))
                 }
 
-                val (metaResult, resolvedCoverUrl, resolvedCoverFile) = metadataDeferred.await()
-                enriched = metaResult
-                coverUrl = resolvedCoverUrl
-                tempCoverFile = resolvedCoverFile
+                val (metaTriple, resolvedLyrics) = metadataDeferred.await()
+                enriched = metaTriple.first
+                coverUrl = metaTriple.second
+                tempCoverFile = metaTriple.third
+                lyricsResult = resolvedLyrics
             }
 
             dao.updateDownloadState(trackId, DownloadStatus.TAGGING.name, 85)
@@ -124,7 +136,8 @@ class DownloadWorker(
             val saved = container.audioTagger.tagAndSaveM4a(
                 tempAudioFile = tempAudioFile!!,
                 coverFile = tempCoverFile,
-                metadata = enriched
+                metadata = enriched,
+                lyricsText = lyricsResult?.plainLyrics ?: lyricsResult?.syncedLyrics
             )
 
             dao.markDownloadCompleted(
@@ -135,7 +148,9 @@ class DownloadWorker(
                 year = enriched.year,
                 hdCoverUrl = coverUrl,
                 localFilePath = saved.localFilePath,
-                localUri = saved.localUri
+                localUri = saved.localUri,
+                plainLyrics = lyricsResult?.plainLyrics,
+                syncedLyrics = lyricsResult?.syncedLyrics
             )
 
             Result.success()

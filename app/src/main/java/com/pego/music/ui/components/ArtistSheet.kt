@@ -1,6 +1,7 @@
 package com.pego.music.ui.components
 
-import androidx.compose.foundation.layout.Arrangement
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,18 +15,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,7 +37,6 @@ import com.pego.music.ui.theme.PegoBlack
 import com.pego.music.ui.theme.PegoGreen
 import com.pego.music.ui.theme.PegoTextSecondary
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ArtistSheet(
     state: ArtistUiState,
@@ -53,129 +50,128 @@ fun ArtistSheet(
     onTrimTrack: (TrackItem) -> Unit,
     onDeleteTrack: (TrackItem) -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val allArtistTracks = state.downloadedTracks + state.recommendedTracks
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = PegoBlack,
-        dragHandle = null
+    BackHandler(onBack = onDismiss)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PegoBlack)
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = state.artistName,
-                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                if (allArtistTracks.isNotEmpty()) {
-                    IconButton(onClick = { onPlayShuffled(allArtistTracks) }) {
-                        Icon(Icons.Rounded.Shuffle, contentDescription = "Aleatorio", tint = PegoGreen)
-                    }
-                    Button(
-                        onClick = { onPlayTrack(allArtistTracks.first(), allArtistTracks) },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = PegoGreen,
-                            contentColor = Color.Black
-                        )
-                    ) {
-                        Text("Play", fontWeight = FontWeight.Bold)
-                    }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Volver")
+            }
+            Text(
+                text = state.artistName,
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (allArtistTracks.isNotEmpty()) {
+                IconButton(onClick = { onPlayShuffled(allArtistTracks) }) {
+                    Icon(Icons.Rounded.Shuffle, contentDescription = "Aleatorio", tint = PegoGreen)
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Cerrar")
+                Button(
+                    onClick = { onPlayTrack(allArtistTracks.first(), allArtistTracks) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PegoGreen,
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("Play", fontWeight = FontWeight.Bold)
                 }
             }
+            Spacer(modifier = Modifier.width(8.dp))
+        }
 
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 80.dp)
-            ) {
-                item(contentType = "header") {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 120.dp)
+        ) {
+            item(contentType = "header") {
+                Text(
+                    text = "Descargadas (${state.downloadedTracks.size})",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            if (state.downloadedTracks.isEmpty()) {
+                item(contentType = "empty_downloaded") {
                     Text(
-                        text = "Descargadas (${state.downloadedTracks.size})",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        text = "Sin canciones descargadas",
+                        color = PegoTextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
                 }
+            } else {
+                items(state.downloadedTracks, key = { "dl_${it.id}" }, contentType = { "track" }) { track ->
+                    TrackRow(
+                        track = track,
+                        isPlaying = track.id == currentTrackId,
+                        onClick = { onPlayTrack(track, state.downloadedTracks) },
+                        onDownloadClick = { onDownloadTrack(track) },
+                        onAddToPlaylist = { onAddToPlaylist(track) },
+                        onEditCover = { onEditCover(track) },
+                        onTrimTrack = { onTrimTrack(track) },
+                        onDeleteTrack = { onDeleteTrack(track) }
+                    )
+                }
+            }
 
-                if (state.downloadedTracks.isEmpty()) {
-                    item(contentType = "empty_downloaded") {
+            item(contentType = "header_recs") {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Más de ${state.artistName}",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            when {
+                state.isLoadingRecommendations -> {
+                    item(contentType = "loading_recs") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = PegoGreen)
+                        }
+                    }
+                }
+
+                state.recommendedTracks.isEmpty() -> {
+                    item(contentType = "empty_recs") {
                         Text(
-                            text = "Sin canciones descargadas",
+                            text = "Sin resultados disponibles",
                             color = PegoTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                         )
                     }
-                } else {
-                    items(state.downloadedTracks, key = { "dl_${it.id}" }, contentType = { "track" }) { track ->
+                }
+
+                else -> {
+                    items(state.recommendedTracks, key = { "rec_${it.id}" }, contentType = { "track" }) { track ->
                         TrackRow(
                             track = track,
                             isPlaying = track.id == currentTrackId,
-                            onClick = { onPlayTrack(track, state.downloadedTracks) },
+                            onClick = { onPlayTrack(track, state.recommendedTracks) },
                             onDownloadClick = { onDownloadTrack(track) },
-                            onAddToPlaylist = { onAddToPlaylist(track) },
-                            onEditCover = { onEditCover(track) },
-                            onTrimTrack = { onTrimTrack(track) },
-                            onDeleteTrack = { onDeleteTrack(track) }
+                            onAddToPlaylist = { onAddToPlaylist(track) }
                         )
-                    }
-                }
-
-                item(contentType = "header_recs") {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Más de ${state.artistName}",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                    )
-                }
-
-                when {
-                    state.isLoadingRecommendations -> {
-                        item(contentType = "loading_recs") {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(24.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(color = PegoGreen)
-                            }
-                        }
-                    }
-
-                    state.recommendedTracks.isEmpty() -> {
-                        item(contentType = "empty_recs") {
-                            Text(
-                                text = "Sin resultados disponibles",
-                                color = PegoTextSecondary,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-
-                    else -> {
-                        items(state.recommendedTracks, key = { "rec_${it.id}" }, contentType = { "track" }) { track ->
-                            TrackRow(
-                                track = track,
-                                isPlaying = track.id == currentTrackId,
-                                onClick = { onPlayTrack(track, state.recommendedTracks) },
-                                onDownloadClick = { onDownloadTrack(track) },
-                                onAddToPlaylist = { onAddToPlaylist(track) }
-                            )
-                        }
                     }
                 }
             }

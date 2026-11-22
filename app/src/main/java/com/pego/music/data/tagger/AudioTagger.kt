@@ -32,9 +32,10 @@ class AudioTagger(private val context: Context) {
     suspend fun tagAndSaveM4a(
         tempAudioFile: File,
         coverFile: File?,
-        metadata: EnrichedMetadata
+        metadata: EnrichedMetadata,
+        lyricsText: String? = null
     ): SavedAudioResult = withContext(Dispatchers.IO) {
-        applyTags(tempAudioFile, coverFile, metadata)
+        applyTags(tempAudioFile, coverFile, metadata, lyricsText)
         val safeName = sanitizeFilename("${metadata.artist} - ${metadata.title}") + ".m4a"
         exportToMusicDirectory(tempAudioFile, safeName, metadata)
     }
@@ -116,7 +117,8 @@ class AudioTagger(private val context: Context) {
     private fun applyTags(
         audioFileTarget: File,
         coverFile: File?,
-        metadata: EnrichedMetadata
+        metadata: EnrichedMetadata,
+        lyricsText: String? = null
     ) {
         runCatching {
             val audioFile = AudioFileIO.read(audioFileTarget)
@@ -125,6 +127,7 @@ class AudioTagger(private val context: Context) {
             if (metadata.artist.isNotBlank()) tag.setField(FieldKey.ARTIST, metadata.artist)
             if (metadata.album.isNotBlank()) tag.setField(FieldKey.ALBUM, metadata.album)
             if (metadata.year.isNotBlank()) tag.setField(FieldKey.YEAR, metadata.year)
+            if (!lyricsText.isNullOrBlank()) tag.setField(FieldKey.LYRICS, lyricsText)
 
             if (coverFile != null && coverFile.exists() && coverFile.length() > 0) {
                 val artwork = ArtworkFactory.createArtworkFromFile(coverFile)

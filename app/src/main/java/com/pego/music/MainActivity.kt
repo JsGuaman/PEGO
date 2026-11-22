@@ -137,22 +137,31 @@ class MainActivity : ComponentActivity() {
                                     indicatorColor = Color.Transparent
                                 )
                                 NavigationBarItem(
-                                    selected = selectedTab == 0,
-                                    onClick = { selectedTab = 0 },
+                                    selected = selectedTab == 0 && artistState == null,
+                                    onClick = {
+                                        viewModel.closeArtistPage()
+                                        selectedTab = 0
+                                    },
                                     icon = { Icon(Icons.Rounded.Home, contentDescription = "Inicio") },
                                     label = { Text("Inicio") },
                                     colors = navColors
                                 )
                                 NavigationBarItem(
-                                    selected = selectedTab == 1,
-                                    onClick = { selectedTab = 1 },
+                                    selected = selectedTab == 1 && artistState == null,
+                                    onClick = {
+                                        viewModel.closeArtistPage()
+                                        selectedTab = 1
+                                    },
                                     icon = { Icon(Icons.Rounded.Search, contentDescription = "Buscar") },
                                     label = { Text("Buscar") },
                                     colors = navColors
                                 )
                                 NavigationBarItem(
-                                    selected = selectedTab == 2,
-                                    onClick = { selectedTab = 2 },
+                                    selected = selectedTab == 2 && artistState == null,
+                                    onClick = {
+                                        viewModel.closeArtistPage()
+                                        selectedTab = 2
+                                    },
                                     icon = { Icon(Icons.Rounded.LibraryMusic, contentDescription = "Biblioteca") },
                                     label = { Text("Biblioteca") },
                                     colors = navColors
@@ -234,6 +243,31 @@ class MainActivity : ComponentActivity() {
                                 onCreateNewPlaylist = { showCreatePlaylist = true }
                             )
                         }
+
+                        artistState?.let { currentArtist ->
+                            ArtistSheet(
+                                state = currentArtist,
+                                currentTrackId = playbackState.currentTrack?.id,
+                                onDismiss = viewModel::closeArtistPage,
+                                onPlayTrack = viewModel::playTrack,
+                                onPlayShuffled = { tracks ->
+                                    if (tracks.isNotEmpty()) {
+                                        if (!playbackState.shuffleEnabled) {
+                                            viewModel.toggleShuffle()
+                                        }
+                                        viewModel.playTrack(tracks.random(), tracks)
+                                    }
+                                },
+                                onDownloadTrack = viewModel::downloadSingleTrack,
+                                onAddToPlaylist = { trackForPlaylist = it },
+                                onEditCover = {
+                                    viewModel.resetCoverEditor()
+                                    trackForCover = it
+                                },
+                                onTrimTrack = { trackForTrim = it },
+                                onDeleteTrack = { viewModel.deleteDownloadedTrack(it.id) }
+                            )
+                        }
                     }
                 }
 
@@ -262,31 +296,6 @@ class MainActivity : ComponentActivity() {
                             showFullPlayer = false
                             viewModel.openArtistPage(artist)
                         }
-                    )
-                }
-
-                artistState?.let { currentArtist ->
-                    ArtistSheet(
-                        state = currentArtist,
-                        currentTrackId = playbackState.currentTrack?.id,
-                        onDismiss = viewModel::closeArtistPage,
-                        onPlayTrack = viewModel::playTrack,
-                        onPlayShuffled = { tracks ->
-                            if (tracks.isNotEmpty()) {
-                                if (!playbackState.shuffleEnabled) {
-                                    viewModel.toggleShuffle()
-                                }
-                                viewModel.playTrack(tracks.random(), tracks)
-                            }
-                        },
-                        onDownloadTrack = viewModel::downloadSingleTrack,
-                        onAddToPlaylist = { trackForPlaylist = it },
-                        onEditCover = {
-                            viewModel.resetCoverEditor()
-                            trackForCover = it
-                        },
-                        onTrimTrack = { trackForTrim = it },
-                        onDeleteTrack = { viewModel.deleteDownloadedTrack(it.id) }
                     )
                 }
 

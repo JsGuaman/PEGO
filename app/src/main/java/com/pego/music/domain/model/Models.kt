@@ -22,6 +22,8 @@ data class TrackItem(
     val sourceUrl: String,
     val localFilePath: String? = null,
     val localUri: String? = null,
+    val plainLyrics: String? = null,
+    val syncedLyrics: String? = null,
     val downloadStatus: DownloadStatus = DownloadStatus.NONE,
     val downloadProgress: Int = 0
 ) {

@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class RepeatMode {
     OFF,
@@ -50,10 +51,11 @@ class PlayerController(
     private val _uiState = MutableStateFlow(PlaybackUiState())
     val uiState: StateFlow<PlaybackUiState> = _uiState.asStateFlow()
 
+    var onTrackTransition: ((TrackItem) -> Unit)? = null
+
     private var mediaController: MediaController? = null
-    private var originalQueue: List<TrackItem> = emptyList()
-    private var activeQueue: List<TrackItem> = emptyList()
-    private var currentIndex: Int = -1
+    private var currentQueue: List<TrackItem> = emptyList()
+    private var trackById: Map<String, TrackItem> = emptyMap()
     private var playJob: Job? = null
     private var prefetchJob: Job? = null
 
@@ -71,6 +73,17 @@ class PlayerController(
                 )
                 val controller = MediaController.Builder(context, token).buildAsync().await()
                 mediaController = controller
+
+                // Sync if service was already playing in background
+                _uiState.update {
+                    it.copy(
+                        isPlaying = controller.isPlaying,
+                        shuffleEnabled = controller.shuffleModeEnabled,
+                        repeatMode = mapExoRepeatMode(controller.repeatMode),
+                        durationMs = controller.duration.coerceAtLeast(it.durationMs)
+                    )
+                }
+
                 controller.addListener(object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         _uiState.update { it.copy(isPlaying = isPlaying) }
@@ -83,9 +96,30 @@ class PlayerController(
                                 durationMs = controller.duration.coerceAtLeast(0L)
                             )
                         }
-                        if (playbackState == Player.STATE_ENDED) {
-                            handleTrackEnded()
+                    }
+
+                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        val id = mediaItem?.mediaId ?: return
+                        val matchedTrack = trackById[id] ?: return
+                        _uiState.update {
+                            it.copy(
+                                currentTrack = matchedTrack,
+                                positionMs = 0L,
+                                durationMs = controller.duration.takeIf { d -> d > 0L }
+                                    ?: (matchedTrack.durationSeconds * 1000L),
+                                errorMessage = null
+                            )
                         }
+                        onTrackTransition?.invoke(matchedTrack)
+                        prefetchUpcomingTracks(controller.currentMediaItemIndex)
+                    }
+
+                    override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                        _uiState.update { it.copy(shuffleEnabled = shuffleModeEnabled) }
+                    }
+
+                    override fun onRepeatModeChanged(repeatMode: Int) {
+                        _uiState.update { it.copy(repeatMode = mapExoRepeatMode(repeatMode)) }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
@@ -120,98 +154,78 @@ class PlayerController(
     }
 
     fun playTrack(track: TrackItem, queue: List<TrackItem> = listOf(track)) {
-        originalQueue = queue
-        if (_uiState.value.shuffleEnabled && queue.size > 1) {
-            val remaining = queue.filter { it.id != track.id }.shuffled()
-            activeQueue = listOf(track) + remaining
-            currentIndex = 0
-        } else {
-            activeQueue = queue
-            currentIndex = queue.indexOfFirst { it.id == track.id }.takeIf { it >= 0 } ?: 0
+        val effectiveQueue = if (queue.any { it.id == track.id }) queue else listOf(track) + queue
+        currentQueue = effectiveQueue
+        trackById = effectiveQueue.associateBy { it.id }
+        val startIndex = effectiveQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+
+        playJob?.cancel()
+        prefetchJob?.cancel()
+
+        playJob = scope.launch {
+            _uiState.update {
+                it.copy(
+                    currentTrack = track,
+                    queue = effectiveQueue,
+                    isBuffering = true,
+                    positionMs = 0L,
+                    durationMs = track.durationSeconds * 1000L,
+                    errorMessage = null
+                )
+            }
+
+            try {
+                val mediaItems = withContext(Dispatchers.IO) {
+                    effectiveQueue.map { item -> buildMediaItemForTrack(item) }
+                }
+
+                val controller = mediaController ?: return@launch
+                controller.setMediaItems(mediaItems, startIndex, 0L)
+                controller.prepare()
+                controller.play()
+
+                prefetchUpcomingTracks(startIndex)
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isBuffering = false,
+                        errorMessage = e.message ?: "No se pudo reproducir la canción"
+                    )
+                }
+            }
         }
-        playAtIndex(currentIndex)
     }
 
     fun toggleShuffle() {
-        val nextShuffle = !_uiState.value.shuffleEnabled
-        val currentTrack = _uiState.value.currentTrack
-        if (originalQueue.isNotEmpty()) {
-            if (nextShuffle) {
-                if (currentTrack != null) {
-                    val remaining = originalQueue.filter { it.id != currentTrack.id }.shuffled()
-                    activeQueue = listOf(currentTrack) + remaining
-                    currentIndex = 0
-                } else {
-                    activeQueue = originalQueue.shuffled()
-                    currentIndex = 0
-                }
-            } else {
-                activeQueue = originalQueue
-                currentIndex = if (currentTrack != null) {
-                    originalQueue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: 0
-                } else 0
-            }
-        }
-        _uiState.update { it.copy(shuffleEnabled = nextShuffle, queue = activeQueue) }
-        prefetchNextTrack()
+        val controller = mediaController ?: return
+        val next = !controller.shuffleModeEnabled
+        controller.shuffleModeEnabled = next
+        _uiState.update { it.copy(shuffleEnabled = next) }
     }
 
     fun cycleRepeatMode() {
-        val nextMode = when (_uiState.value.repeatMode) {
-            RepeatMode.OFF -> RepeatMode.ALL
-            RepeatMode.ALL -> RepeatMode.ONE
-            RepeatMode.ONE -> RepeatMode.OFF
+        val controller = mediaController ?: return
+        val nextExo = when (controller.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
         }
-        _uiState.update { it.copy(repeatMode = nextMode) }
-    }
-
-    private fun handleTrackEnded() {
-        if (activeQueue.isEmpty()) return
-        when (_uiState.value.repeatMode) {
-            RepeatMode.ONE -> {
-                mediaController?.seekTo(0L)
-                mediaController?.play()
-            }
-            RepeatMode.ALL -> {
-                currentIndex = (currentIndex + 1) % activeQueue.size
-                playAtIndex(currentIndex)
-            }
-            RepeatMode.OFF -> {
-                if (currentIndex + 1 < activeQueue.size) {
-                    currentIndex += 1
-                    playAtIndex(currentIndex)
-                } else {
-                    _uiState.update { it.copy(isPlaying = false, positionMs = 0L) }
-                }
-            }
-        }
+        controller.repeatMode = nextExo
+        _uiState.update { it.copy(repeatMode = mapExoRepeatMode(nextExo)) }
     }
 
     fun playNext() {
-        if (activeQueue.isEmpty()) return
-        if (currentIndex + 1 < activeQueue.size) {
-            currentIndex += 1
-            playAtIndex(currentIndex)
-        } else if (_uiState.value.repeatMode == RepeatMode.ALL) {
-            currentIndex = 0
-            playAtIndex(currentIndex)
+        val controller = mediaController ?: return
+        if (controller.hasNextMediaItem()) {
+            controller.seekToNextMediaItem()
+        } else if (controller.repeatMode == Player.REPEAT_MODE_ALL && controller.mediaItemCount > 0) {
+            controller.seekTo(0, 0L)
         }
     }
 
     fun playPrevious() {
-        val controller = mediaController
-        if (controller != null && controller.currentPosition > 3_000L) {
-            controller.seekTo(0L)
-            return
-        }
-        if (activeQueue.isEmpty()) return
-        if (currentIndex - 1 >= 0) {
-            currentIndex -= 1
-            playAtIndex(currentIndex)
-        } else if (_uiState.value.repeatMode == RepeatMode.ALL) {
-            currentIndex = activeQueue.lastIndex
-            playAtIndex(currentIndex)
-        }
+        val controller = mediaController ?: return
+        controller.seekToPrevious()
     }
 
     fun togglePlayPause() {
@@ -225,18 +239,31 @@ class PlayerController(
     }
 
     fun refreshTrackMetadata(updatedTrack: TrackItem, replayAudio: Boolean = false) {
-        originalQueue = originalQueue.map { if (it.id == updatedTrack.id) updatedTrack else it }
-        activeQueue = activeQueue.map { if (it.id == updatedTrack.id) updatedTrack else it }
+        currentQueue = currentQueue.map { if (it.id == updatedTrack.id) updatedTrack else it }
+        trackById = currentQueue.associateBy { it.id }
+
+        val controller = mediaController
+        val idx = currentQueue.indexOfFirst { it.id == updatedTrack.id }
+        if (controller != null && idx >= 0 && idx < controller.mediaItemCount) {
+            scope.launch {
+                val updatedItem = withContext(Dispatchers.IO) { buildMediaItemForTrack(updatedTrack) }
+                if (replayAudio && _uiState.value.currentTrack?.id == updatedTrack.id) {
+                    controller.replaceMediaItem(idx, updatedItem)
+                    controller.seekTo(idx, 0L)
+                    controller.play()
+                } else {
+                    controller.replaceMediaItem(idx, updatedItem)
+                }
+            }
+        }
+
         if (_uiState.value.currentTrack?.id == updatedTrack.id) {
             _uiState.update {
                 it.copy(
                     currentTrack = updatedTrack,
-                    queue = activeQueue,
+                    queue = currentQueue,
                     durationMs = if (replayAudio) updatedTrack.durationSeconds * 1000L else it.durationMs
                 )
-            }
-            if (replayAudio) {
-                playAtIndex(currentIndex)
             }
         }
     }
@@ -245,83 +272,52 @@ class PlayerController(
         _uiState.update { it.copy(errorMessage = null) }
     }
 
-    private fun playAtIndex(index: Int) {
-        val track = activeQueue.getOrNull(index) ?: return
-        playJob?.cancel()
-        prefetchJob?.cancel()
+    private fun prefetchUpcomingTracks(currentIndex: Int) {
+        if (currentQueue.isEmpty()) return
+        val upcoming = listOf(currentIndex + 1, currentIndex + 2)
+            .filter { it in currentQueue.indices }
+            .map { currentQueue[it] }
+            .filter { it.localUri.isNullOrBlank() && it.localFilePath.isNullOrBlank() }
 
-        playJob = scope.launch {
-            _uiState.update {
-                it.copy(
-                    currentTrack = track,
-                    queue = activeQueue,
-                    isBuffering = true,
-                    positionMs = 0L,
-                    durationMs = track.durationSeconds * 1000L,
-                    errorMessage = null
-                )
-            }
-            try {
-                val playableUri = resolvePlayableUri(track)
-                val metadata = MediaMetadata.Builder()
-                    .setTitle(track.cleanTitle.ifBlank { track.title })
-                    .setArtist(track.artist)
-                    .setAlbumTitle(track.album.ifBlank { null })
-                    .setArtworkUri(track.bestCoverUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
-                    .build()
-
-                val mediaItem = MediaItem.Builder()
-                    .setMediaId(track.id)
-                    .setUri(playableUri)
-                    .setMediaMetadata(metadata)
-                    .build()
-
-                val controller = mediaController ?: return@launch
-                controller.setMediaItem(mediaItem)
-                controller.prepare()
-                controller.play()
-
-                prefetchNextTrack()
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isBuffering = false,
-                        errorMessage = e.message ?: "No se pudo reproducir la canción"
-                    )
-                }
-            }
-        }
-    }
-
-    private fun prefetchNextTrack() {
-        val nextIndex = when {
-            activeQueue.isEmpty() -> return
-            currentIndex + 1 < activeQueue.size -> currentIndex + 1
-            _uiState.value.repeatMode == RepeatMode.ALL -> 0
-            else -> return
-        }
-        val nextTrack = activeQueue.getOrNull(nextIndex) ?: return
-        if (!nextTrack.localUri.isNullOrBlank() || !nextTrack.localFilePath.isNullOrBlank()) return
+        if (upcoming.isEmpty()) return
 
         prefetchJob?.cancel()
         prefetchJob = scope.launch(Dispatchers.IO) {
-            if (nextTrack.sourceUrl.isNotBlank()) {
-                extractorRepo.prefetchStreamUrl(nextTrack.sourceUrl)
-            } else {
-                runCatching {
-                    val found = extractorRepo.searchMusic(
-                        "${nextTrack.artist} ${nextTrack.cleanTitle}",
-                        originalsOnly = true
-                    ).firstOrNull()
-                    if (found != null) {
-                        extractorRepo.prefetchStreamUrl(found.sourceUrl)
+            upcoming.forEach { nextTrack ->
+                if (nextTrack.sourceUrl.isNotBlank()) {
+                    extractorRepo.prefetchStreamUrl(nextTrack.sourceUrl)
+                } else {
+                    runCatching {
+                        val found = extractorRepo.searchMusic(
+                            "${nextTrack.artist} ${nextTrack.cleanTitle}",
+                            originalsOnly = true
+                        ).firstOrNull()
+                        if (found != null) {
+                            extractorRepo.prefetchStreamUrl(found.sourceUrl)
+                        }
                     }
                 }
             }
         }
     }
 
-    private suspend fun resolvePlayableUri(track: TrackItem): Uri {
+    private fun buildMediaItemForTrack(track: TrackItem): MediaItem {
+        val uri = resolveMediaUri(track)
+        val metadata = MediaMetadata.Builder()
+            .setTitle(track.cleanTitle.ifBlank { track.title })
+            .setArtist(track.artist)
+            .setAlbumTitle(track.album.ifBlank { null })
+            .setArtworkUri(track.bestCoverUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(track.id)
+            .setUri(uri)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    private fun resolveMediaUri(track: TrackItem): Uri {
         track.localUri?.takeIf { it.isNotBlank() }?.let { uriStr ->
             val parsed = Uri.parse(uriStr)
             if (isLocalUriReadable(parsed)) return parsed
@@ -330,15 +326,13 @@ class PlayerController(
             val file = java.io.File(path)
             if (file.exists() && file.length() > 0L) return Uri.fromFile(file)
         }
-        val streamUrl = if (track.sourceUrl.isNotBlank()) {
-            extractorRepo.resolveFastStreamingAudioUrl(track.sourceUrl)
-        } else {
-            val found = extractorRepo.searchMusic("${track.artist} ${track.cleanTitle}", originalsOnly = true)
-                .firstOrNull()
-                ?: throw IllegalStateException("No se encontró audio para ${track.cleanTitle}")
-            extractorRepo.resolveFastStreamingAudioUrl(found.sourceUrl)
-        }
-        return Uri.parse(streamUrl)
+        return Uri.Builder()
+            .scheme(PegoPlaybackService.SCHEME_PEGO)
+            .authority("resolve")
+            .appendQueryParameter("sourceUrl", track.sourceUrl)
+            .appendQueryParameter("artist", track.artist)
+            .appendQueryParameter("title", track.cleanTitle.ifBlank { track.title })
+            .build()
     }
 
     private fun isLocalUriReadable(uri: Uri): Boolean {
@@ -348,6 +342,14 @@ class PlayerController(
             }.getOrDefault(false)
             "file" -> uri.path?.let { java.io.File(it).let { f -> f.exists() && f.length() > 0L } } ?: false
             else -> false
+        }
+    }
+
+    private fun mapExoRepeatMode(exoMode: Int): RepeatMode {
+        return when (exoMode) {
+            Player.REPEAT_MODE_ALL -> RepeatMode.ALL
+            Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+            else -> RepeatMode.OFF
         }
     }
 }
