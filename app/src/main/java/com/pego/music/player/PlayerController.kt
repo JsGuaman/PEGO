@@ -15,6 +15,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -155,9 +158,48 @@ class PlayerController(
 
     fun playTrack(track: TrackItem, queue: List<TrackItem> = listOf(track)) {
         val effectiveQueue = if (queue.any { it.id == track.id }) queue else listOf(track) + queue
+        val startIndex = effectiveQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+        val controller = mediaController
+
+        // Fast path: switching songs inside the already-loaded queue skips rebuilding MediaItems & ExoPlayer timeline
+        if (
+            controller != null &&
+            controller.mediaItemCount == effectiveQueue.size &&
+            currentQueue.size == effectiveQueue.size &&
+            currentQueue.indices.all { idx -> currentQueue[idx].id == effectiveQueue[idx].id }
+        ) {
+            playJob?.cancel()
+            prefetchJob?.cancel()
+
+            val previousAtTarget = currentQueue[startIndex]
+            currentQueue = effectiveQueue
+            trackById = effectiveQueue.associateBy { it.id }
+
+            if (
+                previousAtTarget.localUri != track.localUri ||
+                previousAtTarget.localFilePath != track.localFilePath
+            ) {
+                controller.replaceMediaItem(startIndex, buildMediaItemForTrack(track))
+            }
+
+            _uiState.update {
+                it.copy(
+                    currentTrack = track,
+                    queue = effectiveQueue,
+                    isBuffering = !track.isDownloaded,
+                    positionMs = 0L,
+                    durationMs = track.durationSeconds * 1000L,
+                    errorMessage = null
+                )
+            }
+            controller.seekTo(startIndex, 0L)
+            controller.play()
+            prefetchUpcomingTracks(startIndex)
+            return
+        }
+
         currentQueue = effectiveQueue
         trackById = effectiveQueue.associateBy { it.id }
-        val startIndex = effectiveQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
 
         playJob?.cancel()
         prefetchJob?.cancel()
@@ -167,7 +209,7 @@ class PlayerController(
                 it.copy(
                     currentTrack = track,
                     queue = effectiveQueue,
-                    isBuffering = true,
+                    isBuffering = !track.isDownloaded,
                     positionMs = 0L,
                     durationMs = track.durationSeconds * 1000L,
                     errorMessage = null
@@ -175,14 +217,30 @@ class PlayerController(
             }
 
             try {
-                val mediaItems = withContext(Dispatchers.IO) {
-                    effectiveQueue.map { item -> buildMediaItemForTrack(item) }
-                }
+                val activeController = mediaController ?: return@launch
 
-                val controller = mediaController ?: return@launch
-                controller.setMediaItems(mediaItems, startIndex, 0L)
-                controller.prepare()
-                controller.play()
+                // Start the selected track immediately without waiting to build/check the whole queue
+                val startItem = buildMediaItemForTrack(track)
+                activeController.setMediaItem(startItem)
+                activeController.prepare()
+                activeController.play()
+
+                if (effectiveQueue.size > 1) {
+                    val (beforeItems, afterItems) = withContext(Dispatchers.Default) {
+                        val before = effectiveQueue.subList(0, startIndex).map { buildMediaItemForTrack(it) }
+                        val after = effectiveQueue.subList(startIndex + 1, effectiveQueue.size)
+                            .map { buildMediaItemForTrack(it) }
+                        before to after
+                    }
+                    if (activeController.currentMediaItem?.mediaId == track.id) {
+                        if (beforeItems.isNotEmpty()) {
+                            activeController.addMediaItems(0, beforeItems)
+                        }
+                        if (afterItems.isNotEmpty()) {
+                            activeController.addMediaItems(afterItems)
+                        }
+                    }
+                }
 
                 prefetchUpcomingTracks(startIndex)
             } catch (e: Exception) {
@@ -291,20 +349,24 @@ class PlayerController(
 
         prefetchJob?.cancel()
         prefetchJob = scope.launch(Dispatchers.IO) {
-            upcoming.forEach { nextTrack ->
-                if (nextTrack.sourceUrl.isNotBlank()) {
-                    extractorRepo.prefetchStreamUrl(nextTrack.sourceUrl)
-                } else {
-                    runCatching {
-                        val found = extractorRepo.searchMusic(
-                            "${nextTrack.artist} ${nextTrack.cleanTitle}",
-                            originalsOnly = true
-                        ).firstOrNull()
-                        if (found != null) {
-                            extractorRepo.prefetchStreamUrl(found.sourceUrl)
+            coroutineScope {
+                upcoming.map { nextTrack ->
+                    async {
+                        if (nextTrack.sourceUrl.isNotBlank()) {
+                            extractorRepo.prefetchStreamUrl(nextTrack.sourceUrl)
+                        } else {
+                            runCatching {
+                                val found = extractorRepo.searchMusic(
+                                    "${nextTrack.artist} ${nextTrack.cleanTitle}",
+                                    originalsOnly = true
+                                ).firstOrNull()
+                                if (found != null) {
+                                    extractorRepo.prefetchStreamUrl(found.sourceUrl)
+                                }
+                            }
                         }
                     }
-                }
+                }.awaitAll()
             }
         }
     }
@@ -328,7 +390,13 @@ class PlayerController(
     private fun resolveMediaUri(track: TrackItem): Uri {
         track.localUri?.takeIf { it.isNotBlank() }?.let { uriStr ->
             val parsed = Uri.parse(uriStr)
-            if (isLocalUriReadable(parsed)) return parsed
+            when (parsed.scheme) {
+                // Trust persisted MediaStore content URIs without slow synchronous Binder openAssetFileDescriptor checks
+                "content" -> return parsed
+                "file" -> if (parsed.path?.let { java.io.File(it).let { f -> f.exists() && f.length() > 0L } } == true) {
+                    return parsed
+                }
+            }
         }
         track.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
             val file = java.io.File(path)
@@ -341,16 +409,6 @@ class PlayerController(
             .appendQueryParameter("artist", track.artist)
             .appendQueryParameter("title", track.cleanTitle.ifBlank { track.title })
             .build()
-    }
-
-    private fun isLocalUriReadable(uri: Uri): Boolean {
-        return when (uri.scheme) {
-            "content" -> runCatching {
-                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false
-            }.getOrDefault(false)
-            "file" -> uri.path?.let { java.io.File(it).let { f -> f.exists() && f.length() > 0L } } ?: false
-            else -> false
-        }
     }
 
     private fun mapExoRepeatMode(exoMode: Int): RepeatMode {

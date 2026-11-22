@@ -110,6 +110,7 @@ class PegoViewModel(
     private var recommendJob: Job? = null
     private var artistJob: Job? = null
     private var syncJob: Job? = null
+    private var lyricsJob: Job? = null
     private var searchGeneration = 0L
 
     val playbackState: StateFlow<PlaybackUiState> = container.playerController.uiState
@@ -722,6 +723,7 @@ class PegoViewModel(
     fun cycleRepeatMode() = container.playerController.cycleRepeatMode()
 
     fun loadLyricsFor(track: TrackItem) {
+        lyricsJob?.cancel()
         val synced = allSavedTracksMap.value[track.id] ?: track
         if (!synced.plainLyrics.isNullOrBlank() || !synced.syncedLyrics.isNullOrBlank()) {
             _lyricsState.value = LyricsResult(
@@ -732,15 +734,18 @@ class PegoViewModel(
             return
         }
 
-        viewModelScope.launch {
+        _lyricsState.value = null
+        lyricsJob = viewModelScope.launch {
             _isLoadingLyrics.value = true
             val fetched = container.lyricsRepository.fetchLyrics(
                 artist = synced.artist,
                 title = synced.cleanTitle.ifBlank { synced.title },
                 durationSeconds = synced.durationSeconds
             )
-            _lyricsState.value = fetched
-            _isLoadingLyrics.value = false
+            if (playbackState.value.currentTrack?.id == synced.id) {
+                _lyricsState.value = fetched
+                _isLoadingLyrics.value = false
+            }
 
             if (fetched != null && synced.isDownloaded &&
                 (!fetched.plainLyrics.isNullOrBlank() || !fetched.syncedLyrics.isNullOrBlank())
