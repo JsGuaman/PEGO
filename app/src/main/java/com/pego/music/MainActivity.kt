@@ -236,6 +236,7 @@ class MainActivity : ComponentActivity() {
                                 onTrimTrack = { trackForTrim = it },
                                 onDeleteTrack = { viewModel.deleteDownloadedTrack(it.id) },
                                 onRemoveTrackFromPlaylist = viewModel::removeTrackFromPlaylist,
+                                onRenamePlaylist = viewModel::renamePlaylist,
                                 onDeletePlaylist = viewModel::deletePlaylist,
                                 onCreateNewPlaylist = { showCreatePlaylist = true },
                                 onSyncLocalLibrary = { viewModel.syncLocalLibrary(showToast = true) }

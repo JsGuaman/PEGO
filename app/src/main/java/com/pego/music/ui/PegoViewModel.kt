@@ -633,6 +633,22 @@ class PegoViewModel(
             if (dao.getTrackById(trackToSave.id) == null) {
                 dao.insertTrackIgnore(TrackEntity.fromDomain(trackToSave))
             }
+            val targetPlaylist = dao.getPlaylistsWithTracksOnce().firstOrNull { it.playlist.id == playlistId }
+            val targetKey = TitleCleaner.normalizeForMatching(
+                "${trackToSave.artist} ${trackToSave.cleanTitle.ifBlank { trackToSave.title }}"
+            )
+            val alreadyInPlaylist = targetPlaylist?.tracks?.any { existing ->
+                existing.id == trackToSave.id ||
+                    TitleCleaner.normalizeForMatching(
+                        "${existing.artist} ${existing.cleanTitle.ifBlank { existing.title }}"
+                    ) == targetKey
+            } == true
+
+            if (alreadyInPlaylist) {
+                _uiMessage.value = "Ya está en esa playlist"
+                return@launch
+            }
+
             dao.insertPlaylistRefs(
                 listOf(PlaylistTrackCrossRef(playlistId = playlistId, trackId = trackToSave.id, position = 0))
             )
@@ -676,10 +692,20 @@ class PegoViewModel(
         }
     }
 
+    fun renamePlaylist(playlistId: Long, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.renamePlaylist(playlistId, trimmed)
+            _uiMessage.value = "Playlist renombrada"
+        }
+    }
+
     fun deletePlaylist(playlistId: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             dao.clearPlaylistRefs(playlistId)
             dao.deletePlaylist(playlistId)
+            _uiMessage.value = "Playlist eliminada"
         }
     }
 

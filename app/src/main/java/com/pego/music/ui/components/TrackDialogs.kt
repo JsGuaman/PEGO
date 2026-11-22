@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -138,7 +139,16 @@ fun AddToPlaylistDialog(
                     )
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+                        val trackKey = com.pego.music.data.metadata.TitleCleaner.normalizeForMatching(
+                            "${track.artist} ${track.cleanTitle.ifBlank { track.title }}"
+                        )
                         items(playlists, key = { it.id }) { pl ->
+                            val alreadyInPlaylist = pl.tracks.any { existing ->
+                                existing.id == track.id ||
+                                    com.pego.music.data.metadata.TitleCleaner.normalizeForMatching(
+                                        "${existing.artist} ${existing.cleanTitle.ifBlank { existing.title }}"
+                                    ) == trackKey
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -153,7 +163,7 @@ fun AddToPlaylistDialog(
                                 Icon(
                                     Icons.AutoMirrored.Rounded.PlaylistAdd,
                                     contentDescription = null,
-                                    tint = PegoGreen
+                                    tint = if (alreadyInPlaylist) PegoTextSecondary else PegoGreen
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
@@ -162,6 +172,14 @@ fun AddToPlaylistDialog(
                                         "${pl.tracks.size} canciones",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = PegoTextSecondary
+                                    )
+                                }
+                                if (alreadyInPlaylist) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircle,
+                                        contentDescription = "Ya agregada",
+                                        tint = PegoGreen
                                     )
                                 }
                             }

@@ -20,21 +20,25 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -54,6 +58,7 @@ import com.pego.music.domain.model.LocalPlaylist
 import com.pego.music.domain.model.TrackItem
 import com.pego.music.ui.components.TrackRow
 import com.pego.music.ui.theme.PegoGreen
+import com.pego.music.ui.theme.PegoSurface
 import com.pego.music.ui.theme.PegoTextSecondary
 
 @Composable
@@ -73,12 +78,15 @@ fun LibraryScreen(
     onTrimTrack: (TrackItem) -> Unit,
     onDeleteTrack: (TrackItem) -> Unit,
     onRemoveTrackFromPlaylist: (Long, String) -> Unit,
+    onRenamePlaylist: (Long, String) -> Unit,
     onDeletePlaylist: (Long) -> Unit,
     onCreateNewPlaylist: () -> Unit,
     onSyncLocalLibrary: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var openedPlaylist by remember { mutableStateOf<LocalPlaylist?>(null) }
+    var playlistToRename by remember { mutableStateOf<LocalPlaylist?>(null) }
+    var playlistToDelete by remember { mutableStateOf<LocalPlaylist?>(null) }
 
     val currentOpened = openedPlaylist?.let { open ->
         playlists.find { it.id == open.id }
@@ -318,7 +326,14 @@ fun LibraryScreen(
                                             color = PegoTextSecondary
                                         )
                                     }
-                                    IconButton(onClick = { onDeletePlaylist(playlist.id) }) {
+                                    IconButton(onClick = { playlistToRename = playlist }) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Edit,
+                                            contentDescription = "Editar nombre",
+                                            tint = PegoTextSecondary
+                                        )
+                                    }
+                                    IconButton(onClick = { playlistToDelete = playlist }) {
                                         Icon(
                                             imageVector = Icons.Rounded.DeleteOutline,
                                             contentDescription = "Eliminar playlist",
@@ -354,6 +369,77 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    playlistToRename?.let { target ->
+        var draftName by remember(target.id) { mutableStateOf(target.name) }
+        AlertDialog(
+            onDismissRequest = { playlistToRename = null },
+            containerColor = PegoSurface,
+            title = { Text("Editar nombre", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = draftName,
+                    onValueChange = { draftName = it },
+                    placeholder = { Text("Nombre de la playlist...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (draftName.isNotBlank()) {
+                            onRenamePlaylist(target.id, draftName.trim())
+                            playlistToRename = null
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PegoGreen,
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text("Guardar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToRename = null }) {
+                    Text("Cancelar", color = PegoTextSecondary)
+                }
+            }
+        )
+    }
+
+    playlistToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { playlistToDelete = null },
+            containerColor = PegoSurface,
+            title = { Text("Eliminar playlist", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "¿Seguro que quieres eliminar \"${target.name}\"? Las canciones descargadas seguirán en tu biblioteca."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeletePlaylist(target.id)
+                        playlistToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("Eliminar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToDelete = null }) {
+                    Text("Cancelar", color = PegoTextSecondary)
+                }
+            }
+        )
     }
 }
 
