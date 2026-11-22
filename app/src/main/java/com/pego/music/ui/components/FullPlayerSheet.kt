@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -315,8 +316,12 @@ fun FullPlayerSheet(
             ) {
                 IconButton(onClick = onToggleShuffle) {
                     Icon(
-                        imageVector = Icons.Rounded.Shuffle,
-                        contentDescription = "Aleatorio",
+                        imageVector = if (playbackState.shuffleEnabled) {
+                            Icons.Rounded.Shuffle
+                        } else {
+                            Icons.AutoMirrored.Rounded.PlaylistPlay
+                        },
+                        contentDescription = if (playbackState.shuffleEnabled) "Aleatorio" else "Secuencial",
                         tint = if (playbackState.shuffleEnabled) PegoGreen else PegoTextSecondary
                     )
                 }

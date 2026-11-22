@@ -6,6 +6,9 @@ import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
@@ -15,21 +18,25 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import com.pego.music.MainActivity
 import com.pego.music.PegoApp
 import com.pego.music.core.network.OkHttpDownloader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 
-class PegoPlaybackService : MediaSessionService() {
+class PegoPlaybackService : MediaSessionService(), MediaSession.Callback {
 
     private var mediaSession: MediaSession? = null
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        setMediaNotificationProvider(DefaultMediaNotificationProvider.Builder(this).build())
 
         val extractorRepo = (application as PegoApp).container.extractorRepo
 
@@ -76,7 +83,7 @@ class PegoPlaybackService : MediaSessionService() {
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        val player = ExoPlayer.Builder(this)
+        val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(resolvingFactory))
             .setLoadControl(loadControl)
             .setWakeMode(C.WAKE_MODE_NETWORK)
@@ -90,6 +97,78 @@ class PegoPlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
+        // Ensure Android SystemUI / lock screen / Bluetooth always receive queue timeline
+        // and enabled Next/Previous transport controls across the full playlist.
+        val sessionPlayer = object : ForwardingPlayer(exoPlayer) {
+            override fun getAvailableCommands(): Player.Commands {
+                val base = super.getAvailableCommands()
+                return if (mediaItemCount > 1) {
+                    base.buildUpon()
+                        .add(COMMAND_SEEK_TO_NEXT)
+                        .add(COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                        .add(COMMAND_SEEK_TO_PREVIOUS)
+                        .add(COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                        .add(COMMAND_GET_TIMELINE)
+                        .build()
+                } else {
+                    base
+                }
+            }
+
+            override fun isCommandAvailable(command: Int): Boolean {
+                return if (
+                    mediaItemCount > 1 &&
+                    command in setOf(
+                        COMMAND_SEEK_TO_NEXT,
+                        COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                        COMMAND_SEEK_TO_PREVIOUS,
+                        COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+                        COMMAND_GET_TIMELINE
+                    )
+                ) {
+                    true
+                } else {
+                    super.isCommandAvailable(command)
+                }
+            }
+
+            override fun seekToNext() {
+                if (hasNextMediaItem()) {
+                    super.seekToNext()
+                } else if (mediaItemCount > 1) {
+                    seekTo(0, 0L)
+                } else {
+                    super.seekToNext()
+                }
+            }
+
+            override fun seekToNextMediaItem() {
+                seekToNext()
+            }
+
+            override fun seekToPrevious() {
+                if (currentPosition > maxSeekToPreviousPosition) {
+                    seekTo(0L)
+                } else if (hasPreviousMediaItem()) {
+                    super.seekToPrevious()
+                } else if (mediaItemCount > 1) {
+                    seekTo(mediaItemCount - 1, 0L)
+                } else {
+                    super.seekToPrevious()
+                }
+            }
+
+            override fun seekToPreviousMediaItem() {
+                if (hasPreviousMediaItem()) {
+                    super.seekToPreviousMediaItem()
+                } else if (mediaItemCount > 1) {
+                    seekTo(mediaItemCount - 1, 0L)
+                } else {
+                    super.seekToPreviousMediaItem()
+                }
+            }
+        }
+
         val sessionActivityIntent = PendingIntent.getActivity(
             this,
             0,
@@ -97,13 +176,49 @@ class PegoPlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        mediaSession = MediaSession.Builder(this, sessionPlayer)
             .setSessionActivity(sessionActivityIntent)
+            .setCallback(this)
             .build()
+    }
+
+    override fun onConnect(
+        session: MediaSession,
+        controller: MediaSession.ControllerInfo
+    ): MediaSession.ConnectionResult {
+        return MediaSession.ConnectionResult.AcceptedResultBuilder(session).build()
+    }
+
+    override fun onAddMediaItems(
+        mediaSession: MediaSession,
+        controller: MediaSession.ControllerInfo,
+        mediaItems: List<MediaItem>
+    ): ListenableFuture<List<MediaItem>> {
+        val resolved = mediaItems.map { item ->
+            val uri = item.requestMetadata.mediaUri ?: item.localConfiguration?.uri
+            if (uri != null && item.localConfiguration?.uri != uri) {
+                item.buildUpon().setUri(uri).build()
+            } else {
+                item
+            }
+        }
+        return Futures.immediateFuture(resolved)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
         return mediaSession
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val player = mediaSession?.player
+        if (
+            player == null ||
+            !player.playWhenReady ||
+            player.mediaItemCount == 0 ||
+            player.playbackState == Player.STATE_ENDED
+        ) {
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {

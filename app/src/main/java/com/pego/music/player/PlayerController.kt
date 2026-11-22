@@ -11,6 +11,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.pego.music.data.extractor.YouTubeExtractorRepository
 import com.pego.music.domain.model.TrackItem
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -57,6 +58,7 @@ class PlayerController(
     var onTrackTransition: ((TrackItem) -> Unit)? = null
 
     private var mediaController: MediaController? = null
+    private val controllerDeferred = CompletableDeferred<MediaController>()
     private var currentQueue: List<TrackItem> = emptyList()
     private var trackById: Map<String, TrackItem> = emptyMap()
     private var playJob: Job? = null
@@ -65,6 +67,10 @@ class PlayerController(
     init {
         connectController()
         startProgressTicker()
+    }
+
+    private suspend fun awaitController(): MediaController? {
+        return mediaController ?: runCatching { controllerDeferred.await() }.getOrNull()
     }
 
     private fun connectController() {
@@ -76,6 +82,7 @@ class PlayerController(
                 )
                 val controller = MediaController.Builder(context, token).buildAsync().await()
                 mediaController = controller
+                controllerDeferred.complete(controller)
 
                 // Sync if service was already playing in background
                 _uiState.update {
@@ -217,30 +224,21 @@ class PlayerController(
             }
 
             try {
-                val activeController = mediaController ?: return@launch
+                val activeController = awaitController() ?: return@launch
 
-                // Start the selected track immediately without waiting to build/check the whole queue
-                val startItem = buildMediaItemForTrack(track)
-                activeController.setMediaItem(startItem)
+                // Send the full playlist atomically to MediaSession so the device notification,
+                // lock screen, and Bluetooth always receive the complete queue & Next/Previous actions.
+                val mediaItems = if (effectiveQueue.size > 1) {
+                    withContext(Dispatchers.Default) {
+                        effectiveQueue.map { buildMediaItemForTrack(it) }
+                    }
+                } else {
+                    listOf(buildMediaItemForTrack(track))
+                }
+
+                activeController.setMediaItems(mediaItems, startIndex, 0L)
                 activeController.prepare()
                 activeController.play()
-
-                if (effectiveQueue.size > 1) {
-                    val (beforeItems, afterItems) = withContext(Dispatchers.Default) {
-                        val before = effectiveQueue.subList(0, startIndex).map { buildMediaItemForTrack(it) }
-                        val after = effectiveQueue.subList(startIndex + 1, effectiveQueue.size)
-                            .map { buildMediaItemForTrack(it) }
-                        before to after
-                    }
-                    if (activeController.currentMediaItem?.mediaId == track.id) {
-                        if (beforeItems.isNotEmpty()) {
-                            activeController.addMediaItems(0, beforeItems)
-                        }
-                        if (afterItems.isNotEmpty()) {
-                            activeController.addMediaItems(afterItems)
-                        }
-                    }
-                }
 
                 prefetchUpcomingTracks(startIndex)
             } catch (e: Exception) {
@@ -255,7 +253,16 @@ class PlayerController(
     }
 
     fun toggleShuffle() {
-        val controller = mediaController ?: return
+        val controller = mediaController
+        if (controller == null) {
+            scope.launch {
+                val connected = awaitController() ?: return@launch
+                val next = !connected.shuffleModeEnabled
+                connected.shuffleModeEnabled = next
+                _uiState.update { it.copy(shuffleEnabled = next) }
+            }
+            return
+        }
         val next = !controller.shuffleModeEnabled
         controller.shuffleModeEnabled = next
         _uiState.update { it.copy(shuffleEnabled = next) }
@@ -274,11 +281,7 @@ class PlayerController(
 
     fun playNext() {
         val controller = mediaController ?: return
-        if (controller.hasNextMediaItem()) {
-            controller.seekToNextMediaItem()
-        } else if (controller.repeatMode == Player.REPEAT_MODE_ALL && controller.mediaItemCount > 0) {
-            controller.seekTo(0, 0L)
-        }
+        controller.seekToNext()
     }
 
     fun playPrevious() {
@@ -378,11 +381,19 @@ class PlayerController(
             .setArtist(track.artist)
             .setAlbumTitle(track.album.ifBlank { null })
             .setArtworkUri(track.bestCoverUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .build()
 
         return MediaItem.Builder()
             .setMediaId(track.id)
             .setUri(uri)
+            .setRequestMetadata(
+                MediaItem.RequestMetadata.Builder()
+                    .setMediaUri(uri)
+                    .build()
+            )
             .setMediaMetadata(metadata)
             .build()
     }
